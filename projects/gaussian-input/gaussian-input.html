@@ -400,7 +400,7 @@ function buildRoute(usedCons) {
 }
 
 function defaultTitle() {
-  return `${$("name").value.trim() || "job"} ${TYPES.find(t => t.id === calc).label.toLowerCase()}`;
+  return `${$("name").value.trim() || "job"} ${TYPES.find(t => t.id === calc).label}`;
 }
 
 function build() {
