@@ -22,14 +22,15 @@
   - Charge / multiplicity: `0 1`
   - Resources: `%nprocshared=16`, `%mem=5GB`, `%chk=<file name>.chk`
   - Everything can be overwritten by typing; button "Save as my defaults" (remembered in this browser only).
-- Live preview of the `.gjf` file, plus "Copy" and "Download .gjf" buttons.
+- Live preview of the input file, saved as `.com` (matches the cluster script), plus "Copy" and "Download" buttons.
+- **PBS job script** (`<name>.sh`, added in step 7): `#PBS -l mem` = %mem + 1GB, `ncpus` = %nprocshared, walltime (default `168:00:00`), `cd $PBS_O_WORKDIR`, module line (default `module load scientific/gaussian/16-C01`), run command (default `dog16 <name>.com`). Unix line endings. Saved with "my defaults".
 - Short hints next to each field so colleagues and students understand it.
 
 ## OUT (not now)
 
 - Running Gaussian.
 - 3D molecule viewer.
-- Cluster job scripts (SLURM/PBS) — good candidate for later.
+- SLURM job scripts; submitting jobs to the cluster.
 - ORCA — maybe later.
 
 ## Sample data

@@ -67,7 +67,7 @@
 <body>
 <header>
   <h1>Gaussian Input Builder</h1>
-  <p>Open an .xyz file, choose the calculation, add constraints, and copy or download a ready .gjf file. Nothing leaves your computer.</p>
+  <p>Open an .xyz file, choose the calculation, add constraints, and copy or download a ready .com input plus a PBS job script. Nothing leaves your computer.</p>
 </header>
 <main>
 <section>
@@ -141,6 +141,13 @@
       <div><label for="nproc">Cores (%nprocshared)</label><input type="number" id="nproc" min="1" step="1"></div>
       <div><label for="mem">Memory (%mem)</label><input type="text" id="mem"></div>
     </div>
+    <h2 style="margin-top:16px">Cluster job (PBS)</h2>
+    <p class="hint">Cores are taken from %nprocshared. PBS memory = %mem + 1GB, so Gaussian has some room.</p>
+    <div class="row">
+      <div><label for="walltime">Walltime (hh:mm:ss)</label><input type="text" id="walltime"></div>
+      <div><label for="runner">Run command</label><input type="text" id="runner"><p class="hint">Followed by the .com file name.</p></div>
+    </div>
+    <label for="module">Module line</label><input type="text" id="module">
     <div class="btns">
       <button class="secondary" id="saveDef">Save as my defaults</button>
       <button class="secondary" id="resetDef">Back to original defaults</button>
@@ -151,13 +158,22 @@
 
 <section>
   <div class="card sticky">
-    <h2>5 · Gaussian input (.gjf)</h2>
+    <h2>5 · Gaussian input (.com)</h2>
     <div id="checkMsg"></div>
     <div class="btns" style="margin-bottom:10px">
       <button id="copyBtn">Copy</button>
-      <button id="dlBtn">Download .gjf</button>
+      <button id="dlBtn">Download .com</button>
+      <button class="secondary" id="dlBoth">Download .com + .sh</button>
     </div>
     <pre id="preview"></pre>
+    <h2 style="margin-top:16px">6 · PBS job script (.sh)</h2>
+    <p class="hint">Put both files in the same folder on the cluster and submit with <code>qsub <span id="shName">job.sh</span></code>.</p>
+    <div id="pbsMsg"></div>
+    <div class="btns" style="margin-bottom:10px">
+      <button id="copySh">Copy</button>
+      <button id="dlSh">Download .sh</button>
+    </div>
+    <pre id="pbsPreview"></pre>
   </div>
 </section>
 </main>
@@ -172,6 +188,9 @@ const FACTORY = {
   solvent: "SCRF=(PCM,Solvent=Acetonitrile)",
   extra: "",
   charge: 0, mult: 1, nproc: 16, mem: "5GB",
+  walltime: "168:00:00",
+  module: "module load scientific/gaussian/16-C01",
+  runner: "dog16",
   conv: { opt: "Tight", copt: "Normal", ts: "Normal", scan: "Normal" },
   freq: { opt: true, copt: true, ts: true, scan: false }
 };
@@ -459,7 +478,38 @@ function build() {
   return { text: L.join("\n") + "\n", errors, warns, name: name || "job" };
 }
 
-let last = null;
+// ---------- PBS script ----------
+function pbsMem(mem) {
+  const m = mem.trim().match(/^(\d+)\s*(MB|GB)?$/i);
+  if (!m) return null;
+  const n = Number(m[1]), unit = (m[2] || "").toUpperCase();
+  if (unit === "GB") return `${n + 1}GB`;
+  if (unit === "MB") return `${n + 1024}MB`;
+  return null;
+}
+
+function buildPBS(name) {
+  const errors = [];
+  const mem = pbsMem($("mem").value);
+  if (!mem) errors.push("For the PBS script, write %mem in GB or MB (e.g. 5GB).");
+  const wt = $("walltime").value.trim();
+  if (!/^\d+:[0-5]\d:[0-5]\d$/.test(wt)) errors.push("Walltime should look like 168:00:00.");
+  const runner = $("runner").value.trim();
+  if (!runner) errors.push("Run command is empty.");
+  const L = [
+    "#!/bin/bash",
+    `#PBS -l mem=${mem || "?"}`,
+    `#PBS -l ncpus=${$("nproc").value.trim()}`,
+    `#PBS -l walltime=${wt}`,
+    "",
+    "cd $PBS_O_WORKDIR"
+  ];
+  const mod = $("module").value.trim(); if (mod) L.push(mod);
+  L.push(`${runner} ${name}.com`);
+  return { text: L.join("\n") + "\n", errors };
+}
+
+let last = null, lastSh = null;
 function render() {
   $("title").placeholder = defaultTitle();
   last = build();
@@ -469,6 +519,14 @@ function render() {
   else if (last.warns.length) box.innerHTML = `<div class="msg warn">${last.warns.map(esc).join("<br>")}</div>`;
   else box.innerHTML = `<div class="msg ok">All checks passed.</div>`;
   $("copyBtn").disabled = $("dlBtn").disabled = last.errors.length > 0;
+
+  lastSh = buildPBS(last.name);
+  $("pbsPreview").textContent = lastSh.text;
+  $("shName").textContent = `${last.name}.sh`;
+  $("pbsMsg").innerHTML = lastSh.errors.length
+    ? `<div class="msg err"><b>Fix before using this script:</b><br>${lastSh.errors.map(esc).join("<br>")}</div>` : "";
+  $("copySh").disabled = $("dlSh").disabled = lastSh.errors.length > 0;
+  $("dlBoth").disabled = last.errors.length > 0 || lastSh.errors.length > 0;
 }
 
 // ---------- settings fields ----------
@@ -477,10 +535,11 @@ function fillSettings() {
   $("solvent").value = settings.solvent; $("extra").value = settings.extra;
   $("charge").value = settings.charge; $("mult").value = settings.mult;
   $("nproc").value = settings.nproc; $("mem").value = settings.mem;
+  $("walltime").value = settings.walltime; $("module").value = settings.module; $("runner").value = settings.runner;
   syncCalcFields();
 }
 
-["mOpt", "mSP", "solvent", "extra", "charge", "mult", "nproc", "mem", "name"].forEach(id =>
+["mOpt", "mSP", "solvent", "extra", "charge", "mult", "nproc", "mem", "name", "walltime", "module", "runner"].forEach(id =>
   $(id).addEventListener("input", render));
 $("title").addEventListener("input", () => { titleTouched = $("title").value.trim() !== ""; render(); });
 $("conv").addEventListener("change", () => { settings.conv[calc] = $("conv").value; render(); });
@@ -490,7 +549,8 @@ $("saveDef").addEventListener("click", () => {
   const s = {
     mOpt: $("mOpt").value.trim(), mSP: $("mSP").value.trim(), solvent: $("solvent").value.trim(),
     extra: $("extra").value.trim(), charge: Number($("charge").value), mult: Number($("mult").value),
-    nproc: Number($("nproc").value), mem: $("mem").value.trim(), conv: settings.conv, freq: settings.freq
+    nproc: Number($("nproc").value), mem: $("mem").value.trim(), conv: settings.conv, freq: settings.freq,
+    walltime: $("walltime").value.trim(), module: $("module").value.trim(), runner: $("runner").value.trim()
   };
   try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); $("defMsg").innerHTML = `<div class="msg ok">Saved. These settings load automatically next time (in this browser).</div>`; }
   catch (e) { $("defMsg").innerHTML = `<div class="msg warn">This browser does not allow saving here. Settings are used for this session only.</div>`; }
@@ -514,20 +574,29 @@ $("fileIn").addEventListener("change", () => {
 $("sampleBtn").addEventListener("click", () => setGeometry(SAMPLE_XYZ, SAMPLE_NAME));
 $("addCon").addEventListener("click", () => { constraints.push(newCon(calc === "scan" && !constraints.some(c => c.action === "S") ? "S" : "F")); renderConstraints(); render(); });
 
-$("copyBtn").addEventListener("click", async () => {
-  try { await navigator.clipboard.writeText(last.text); }
+async function copyText(text, btn) {
+  try { await navigator.clipboard.writeText(text); }
   catch (e) {
-    const ta = document.createElement("textarea"); ta.value = last.text; document.body.appendChild(ta);
+    const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta);
     ta.select(); document.execCommand("copy"); ta.remove();
   }
-  $("copyBtn").textContent = "Copied ✓"; setTimeout(() => $("copyBtn").textContent = "Copy", 1500);
-});
-$("dlBtn").addEventListener("click", () => {
-  const blob = new Blob([last.text], { type: "text/plain" });
+  btn.textContent = "Copied ✓"; setTimeout(() => btn.textContent = "Copy", 1500);
+}
+// Files use Unix line endings (\n), so the cluster reads them correctly.
+function download(text, filename) {
+  const blob = new Blob([text], { type: "text/plain" });
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob); a.download = `${last.name}.gjf`;
+  a.href = URL.createObjectURL(blob); a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+$("copyBtn").addEventListener("click", () => copyText(last.text, $("copyBtn")));
+$("copySh").addEventListener("click", () => copyText(lastSh.text, $("copySh")));
+$("dlBtn").addEventListener("click", () => download(last.text, `${last.name}.com`));
+$("dlSh").addEventListener("click", () => download(lastSh.text, `${last.name}.sh`));
+$("dlBoth").addEventListener("click", () => {
+  download(last.text, `${last.name}.com`);
+  setTimeout(() => download(lastSh.text, `${last.name}.sh`), 400);
 });
 
 // ---------- start ----------
