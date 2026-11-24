@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gaussian Input Builder</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d232b; --muted: #5b6573;
+    --line: #d9dee5; --accent: #2457c5; --accent-soft: #e6edfb;
+    --warn: #a4400a; --warn-bg: #fff1e6; --err: #b3261e; --err-bg: #fdecea;
+    --ok: #1d7a3a; --code-bg: #0f172a; --code-text: #e2e8f0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151a; --card: #1b2028; --text: #e6e9ee; --muted: #9aa4b2;
+      --line: #2c333d; --accent: #7aa2ff; --accent-soft: #1f2a44;
+      --warn: #ffb37a; --warn-bg: #3a2414; --err: #ff8a80; --err-bg: #3b1a18;
+      --ok: #6fd08c; --code-bg: #0b0f17; --code-text: #e2e8f0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 18px 20px 6px; }
+  h1 { margin: 0; font-size: 22px; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; padding: 16px 20px 40px; }
+  @media (max-width: 1000px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
+  h2 { font-size: 16px; margin: 0 0 10px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 2px 0 8px; }
+  label { display: block; font-weight: 600; font-size: 13px; margin-top: 8px; }
+  input[type=text], input[type=number], select {
+    width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--bg); color: var(--text); font: inherit; }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--accent);
+           background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .types { display: flex; flex-wrap: wrap; gap: 6px; }
+  .types label { margin: 0; font-weight: 500; border: 1px solid var(--line); border-radius: 20px;
+                 padding: 5px 12px; cursor: pointer; }
+  .types input { display: none; }
+  .types label.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; }
+  td.num { font-family: ui-monospace, Consolas, monospace; text-align: right; }
+  .atoms-wrap { max-height: 260px; overflow: auto; }
+  .con-table input, .con-table select { padding: 4px 6px; }
+  .con-table td { vertical-align: middle; }
+  pre { background: var(--code-bg); color: var(--code-text); padding: 12px; border-radius: 8px;
+        overflow: auto; font: 13px/1.4 ui-monospace, Consolas, monospace; margin: 0; max-height: 70vh; }
+  .msg { padding: 8px 10px; border-radius: 6px; font-size: 13px; margin-top: 8px; }
+  .msg.err { background: var(--err-bg); color: var(--err); }
+  .msg.warn { background: var(--warn-bg); color: var(--warn); }
+  .msg.ok { color: var(--ok); }
+  .inline { display: flex; align-items: center; gap: 6px; font-weight: 500; margin-top: 8px; }
+  .inline input { width: auto; }
+  .sticky { position: sticky; top: 12px; }
+  .x { background: transparent; color: var(--err); border-color: var(--err); padding: 2px 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Gaussian Input Builder</h1>
+  <p>Open an .xyz file, choose the calculation, add constraints, and copy or download a ready .gjf file. Nothing leaves your computer.</p>
+</header>
+<main>
+<section>
+  <div class="card">
+    <h2>1 · Geometry</h2>
+    <p class="hint">Opens a standard .xyz file (atom count, comment line, then "Element x y z"). A made-up ethane sample is loaded at start.</p>
+    <div class="btns">
+      <button id="openBtn">Open .xyz file…</button>
+      <button class="secondary" id="sampleBtn">Load sample again</button>
+      <input type="file" id="fileIn" accept=".xyz,.txt" hidden>
+    </div>
+    <div id="geoMsg"></div>
+    <div class="atoms-wrap" style="margin-top:10px">
+      <table id="atomTable"><thead><tr><th>#</th><th>Element</th><th style="text-align:right">x</th><th style="text-align:right">y</th><th style="text-align:right">z</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2 · Calculation</h2>
+    <div class="types" id="types"></div>
+    <p class="hint" id="typeHint"></p>
+    <div class="row" id="optRow">
+      <div>
+        <label for="conv">Convergence</label>
+        <select id="conv"><option>Loose</option><option>Normal</option><option>Tight</option></select>
+      </div>
+      <div>
+        <label class="inline"><input type="checkbox" id="freq"> Add Freq</label>
+        <p class="hint">Frequencies after the optimisation.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="conCard">
+    <h2>3 · Constraints</h2>
+    <p class="hint" id="conHint"></p>
+    <table class="con-table" id="conTable">
+      <thead><tr><th>Atoms</th><th>Kind</th><th>Action</th><th>Steps</th><th>Step size</th><th>Now</th><th>After scan</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="btns"><button class="secondary" id="addCon">+ Add constraint</button></div>
+    <p class="hint">Type 2 atom numbers for a bond (Å), 3 for an angle (°), 4 for a dihedral (°), separated by spaces. Check the "Now" value to be sure you picked the right atoms.</p>
+  </div>
+
+  <div class="card">
+    <h2>4 · Settings</h2>
+    <p class="hint">Pre-filled with your defaults. Change what you need for this job.</p>
+    <div class="row">
+      <div><label for="name">Job name</label><input type="text" id="name"><p class="hint">Used for %chk and the file name.</p></div>
+      <div><label for="title">Title line</label><input type="text" id="title"></div>
+    </div>
+    <div class="row">
+      <div><label for="mOpt">Method/basis (opt, TS, scan)</label><input type="text" id="mOpt" list="methods"></div>
+      <div><label for="mSP">Method/basis (single point)</label><input type="text" id="mSP" list="methods"></div>
+    </div>
+    <datalist id="methods">
+      <option value="wB97XD/6-31G**"><option value="wB97XD/6-311++G(d,p)"><option value="B3LYP/6-31G(d)">
+      <option value="B3LYP/6-311++G(d,p) EmpiricalDispersion=GD3BJ"><option value="M062X/6-31G(d)"><option value="M062X/def2TZVP">
+    </datalist>
+    <div class="row">
+      <div><label for="solvent">Solvent model</label><input type="text" id="solvent" list="solvents"><p class="hint">Leave empty for gas phase.</p></div>
+      <div><label for="extra">Extra keywords</label><input type="text" id="extra" placeholder="e.g. Int=UltraFine"></div>
+    </div>
+    <datalist id="solvents">
+      <option value="SCRF=(PCM,Solvent=Acetonitrile)"><option value="SCRF=(PCM,Solvent=Water)"><option value="SCRF=(PCM,Solvent=DiMethylSulfoxide)">
+      <option value="SCRF=(PCM,Solvent=Toluene)"><option value="SCRF=(SMD,Solvent=Acetonitrile)">
+    </datalist>
+    <div class="row">
+      <div><label for="charge">Charge</label><input type="number" id="charge" step="1"></div>
+      <div><label for="mult">Multiplicity</label><input type="number" id="mult" step="1" min="1"></div>
+      <div><label for="nproc">Cores (%nprocshared)</label><input type="number" id="nproc" min="1" step="1"></div>
+      <div><label for="mem">Memory (%mem)</label><input type="text" id="mem"></div>
+    </div>
+    <div class="btns">
+      <button class="secondary" id="saveDef">Save as my defaults</button>
+      <button class="secondary" id="resetDef">Back to original defaults</button>
+    </div>
+    <div id="defMsg"></div>
+  </div>
+</section>
+
+<section>
+  <div class="card sticky">
+    <h2>5 · Gaussian input (.gjf)</h2>
+    <div id="checkMsg"></div>
+    <div class="btns" style="margin-bottom:10px">
+      <button id="copyBtn">Copy</button>
+      <button id="dlBtn">Download .gjf</button>
+    </div>
+    <pre id="preview"></pre>
+  </div>
+</section>
+</main>
+
+<script>
+"use strict";
+
+// ---------- defaults ----------
+const FACTORY = {
+  mOpt: "wB97XD/6-31G**",
+  mSP: "wB97XD/6-311++G(d,p)",
+  solvent: "SCRF=(PCM,Solvent=Acetonitrile)",
+  extra: "",
+  charge: 0, mult: 1, nproc: 16, mem: "5GB",
+  conv: { opt: "Tight", copt: "Normal", ts: "Normal", scan: "Normal" },
+  freq: { opt: true, copt: true, ts: true, scan: false }
+};
+const STORE_KEY = "gaussianInputBuilder.defaults.v1";
+
+const TYPES = [
+  { id: "opt",  label: "Optimisation",            hint: "Regular geometry optimisation, no constraints." },
+  { id: "copt", label: "Constrained optimisation", hint: "Optimisation with frozen coordinates (F). Add at least one constraint below." },
+  { id: "ts",   label: "TS search",                hint: "Opt=(TS,CalcFC,NoEigenTest). Constraints are optional; if you add any, ModRedundant is added." },
+  { id: "scan", label: "Relaxed scan",             hint: "Scan one or more coordinates (S) while everything else relaxes. Frozen (F) coordinates are allowed too." },
+  { id: "sp",   label: "Single point",             hint: "Energy only at the given geometry. Uses the single-point method/basis." }
+];
+
+const SAMPLE_NAME = "ethane_sample";
+const SAMPLE_XYZ = `8
+Ethane, staggered (made-up sample geometry)
+C     0.000000    0.000000    0.765000
+C     0.000000    0.000000   -0.765000
+H     1.017600    0.000000    1.155600
+H    -0.508800    0.881300    1.155600
+H    -0.508800   -0.881300    1.155600
+H    -1.017600    0.000000   -1.155600
+H     0.508800   -0.881300   -1.155600
+H     0.508800    0.881300   -1.155600
+`;
+
+// ---------- state ----------
+let settings = loadDefaults();
+let calc = "opt";
+let atoms = [];
+let constraints = [];   // {atoms: "1 2", action: "F"|"S", steps: 10, size: 0.1}
+let titleTouched = false;
+
+const $ = id => document.getElementById(id);
+
+function loadDefaults() {
+  const s = JSON.parse(JSON.stringify(FACTORY));
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      Object.assign(s, saved);
+      s.conv = Object.assign({}, FACTORY.conv, saved.conv || {});
+      s.freq = Object.assign({}, FACTORY.freq, saved.freq || {});
+    }
+  } catch (e) { /* storage not available: use factory defaults */ }
+  return s;
+}
+
+// ---------- xyz parsing ----------
+function parseXYZ(text) {
+  const lines = text.replace(/\r/g, "").split("\n");
+  const out = []; const problems = [];
+  let start = 0, expected = null;
+  if (/^\s*\d+\s*$/.test(lines[0] || "")) { expected = parseInt(lines[0], 10); start = 2; }
+  for (let i = start; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t) continue;
+    const p = t.split(/\s+/);
+    if (p.length < 4) { problems.push(`Line ${i + 1} skipped: "${t.slice(0, 40)}"`); continue; }
+    const x = Number(p[1]), y = Number(p[2]), z = Number(p[3]);
+    if (![x, y, z].every(Number.isFinite)) { problems.push(`Line ${i + 1} has no valid numbers.`); continue; }
+    out.push({ el: p[0], x, y, z });
+    if (expected !== null && out.length === expected) break;
+  }
+  if (expected !== null && out.length !== expected)
+    problems.push(`The file says ${expected} atoms, but ${out.length} were found.`);
+  return { atoms: out, problems };
+}
+
+function setGeometry(text, name) {
+  const r = parseXYZ(text);
+  atoms = r.atoms;
+  $("name").value = name;
+  if (!titleTouched) $("title").value = "";
+  const box = $("geoMsg");
+  if (!atoms.length) box.innerHTML = `<div class="msg err">No atoms found in this file.</div>`;
+  else if (r.problems.length) box.innerHTML = `<div class="msg warn">${r.problems.map(esc).join("<br>")}</div>`;
+  else box.innerHTML = `<div class="msg ok">${atoms.length} atoms read from ${esc(name)}.</div>`;
+  renderAtoms(); render();
+}
+
+// ---------- geometry math ----------
+const sub = (a, b) => [a.x - b.x, a.y - b.y, a.z - b.z];
+const dot = (u, v) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+const cross = (u, v) => [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+const norm = u => Math.sqrt(dot(u, u));
+const DEG = 180 / Math.PI;
+
+function measure(idx) {
+  const p = idx.map(i => atoms[i - 1]);
+  if (idx.length === 2) return norm(sub(p[0], p[1]));
+  if (idx.length === 3) {
+    const u = sub(p[0], p[1]), v = sub(p[2], p[1]);
+    return Math.acos(Math.max(-1, Math.min(1, dot(u, v) / (norm(u) * norm(v))))) * DEG;
+  }
+  const b1 = sub(p[1], p[0]), b2 = sub(p[2], p[1]), b3 = sub(p[3], p[2]);
+  const n1 = cross(b1, b2), n2 = cross(b2, b3);
+  const m1 = cross(n1, b2.map(c => c / norm(b2)));
+  return Math.atan2(dot(m1, n2), dot(n1, n2)) * DEG;
+}
+
+// ---------- constraint checks ----------
+const KIND = { 2: ["B", "bond", "Å"], 3: ["A", "angle", "°"], 4: ["D", "dihedral", "°"] };
+
+function checkConstraint(c) {
+  const parts = c.atoms.trim().split(/[\s,]+/).filter(Boolean);
+  if (!parts.length) return { error: "type atom numbers" };
+  if (!parts.every(s => /^\d+$/.test(s))) return { error: "only whole numbers allowed" };
+  const idx = parts.map(Number);
+  if (!KIND[idx.length]) return { error: "needs 2, 3 or 4 atoms" };
+  const bad = idx.filter(i => i < 1 || i > atoms.length);
+  if (bad.length) return { error: `atom ${bad.join(", ")} does not exist (molecule has ${atoms.length})` };
+  if (new Set(idx).size !== idx.length) return { error: "the same atom is used twice" };
+  const k = KIND[idx.length];
+  const value = measure(idx);
+  const res = { idx, letter: k[0], kind: k[1], unit: k[2], value };
+  if (c.action === "S") {
+    if (!(Number.isInteger(c.steps) && c.steps > 0)) return Object.assign(res, { error: "steps must be a whole number above 0" });
+    if (!(Number.isFinite(c.size) && c.size !== 0)) return Object.assign(res, { error: "step size must be a number, not 0" });
+    res.final = value + c.steps * c.size;
+    if (res.letter === "B" && res.final <= 0) res.error = "the bond would shrink below 0 Å";
+    else if (res.letter === "A" && (res.final <= 0 || res.final >= 180)) res.warn = "the angle would leave the 0–180° range";
+  }
+  return res;
+}
+
+// ---------- rendering ----------
+function esc(s) { return String(s).replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch])); }
+const f6 = n => n.toFixed(6);
+
+function renderAtoms() {
+  $("atomTable").querySelector("tbody").innerHTML = atoms.map((a, i) =>
+    `<tr><td>${i + 1}</td><td>${esc(a.el)}</td><td class="num">${f6(a.x)}</td><td class="num">${f6(a.y)}</td><td class="num">${f6(a.z)}</td></tr>`).join("");
+}
+
+function renderTypes() {
+  $("types").innerHTML = TYPES.map(t =>
+    `<label class="${t.id === calc ? "on" : ""}"><input type="radio" name="calc" value="${t.id}" ${t.id === calc ? "checked" : ""}>${t.label}</label>`).join("");
+  $("types").querySelectorAll("input").forEach(inp => inp.addEventListener("change", () => {
+    calc = inp.value;
+    if (calc !== "scan") constraints.forEach(c => { if (c.action === "S") c.action = "F"; });
+    if (calc === "scan" && !constraints.some(c => c.action === "S")) {
+      if (constraints.length === 0) constraints.push(newCon("S"));
+      else constraints[0].action = "S";
+    }
+    renderTypes(); syncCalcFields(); renderConstraints(); render();
+  }));
+  $("typeHint").textContent = TYPES.find(t => t.id === calc).hint;
+}
+
+function syncCalcFields() {
+  const isOpt = calc !== "sp";
+  $("optRow").style.display = isOpt ? "" : "none";
+  if (isOpt) { $("conv").value = settings.conv[calc]; $("freq").checked = settings.freq[calc]; }
+  const showCon = calc === "copt" || calc === "ts" || calc === "scan";
+  $("conCard").style.display = showCon ? "" : "none";
+  $("conHint").textContent = {
+    copt: "Frozen coordinates (F) are kept at their current value.",
+    ts: "Optional. Freeze coordinates you don't want to move during the TS search.",
+    scan: "At least one coordinate must be scanned (S). Two S lines give a 2D scan."
+  }[calc] || "";
+}
+
+function newCon(action) { return { atoms: "", action: action || "F", steps: 10, size: 0.1 }; }
+
+function renderConstraints() {
+  const tb = $("conTable").querySelector("tbody");
+  tb.innerHTML = constraints.map((c, i) => {
+    const r = checkConstraint(c);
+    const scanOK = calc === "scan";
+    const isS = c.action === "S";
+    const nowTxt = r.value !== undefined ? `${r.value.toFixed(r.unit === "Å" ? 3 : 1)} ${r.unit}` : "–";
+    const finTxt = isS && r.final !== undefined ? `${r.final.toFixed(r.unit === "Å" ? 3 : 1)} ${r.unit}` : "–";
+    const kind = r.kind || "–";
+    const msg = r.error ? `<tr><td colspan="8"><div class="msg err">Row ${i + 1}: ${esc(r.error)}</div></td></tr>`
+              : r.warn ? `<tr><td colspan="8"><div class="msg warn">Row ${i + 1}: ${esc(r.warn)}</div></td></tr>` : "";
+    return `<tr>
+      <td><input type="text" data-i="${i}" data-f="atoms" value="${esc(c.atoms)}" placeholder="e.g. 1 2" style="width:90px"></td>
+      <td>${kind}</td>
+      <td><select data-i="${i}" data-f="action">
+            <option value="F" ${!isS ? "selected" : ""}>F (freeze)</option>
+            ${scanOK ? `<option value="S" ${isS ? "selected" : ""}>S (scan)</option>` : ""}
+          </select></td>
+      <td><input type="number" data-i="${i}" data-f="steps" value="${c.steps}" step="1" min="1" style="width:64px" ${isS ? "" : "disabled"}></td>
+      <td><input type="number" data-i="${i}" data-f="size" value="${c.size}" step="0.05" style="width:76px" ${isS ? "" : "disabled"}></td>
+      <td class="num">${nowTxt}</td>
+      <td class="num">${finTxt}</td>
+      <td><button class="x" data-del="${i}" title="Remove">×</button></td>
+    </tr>${msg}`;
+  }).join("") || `<tr><td colspan="8" class="hint">No constraints yet.</td></tr>`;
+
+  tb.querySelectorAll("[data-f]").forEach(el => {
+    const ev = el.tagName === "SELECT" ? "change" : "change";
+    el.addEventListener(ev, () => {
+      const c = constraints[+el.dataset.i], f = el.dataset.f;
+      if (f === "steps") c.steps = Number(el.value);
+      else if (f === "size") c.size = Number(el.value);
+      else c[f] = el.value;
+      renderConstraints(); render();
+    });
+  });
+  tb.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => {
+    constraints.splice(+b.dataset.del, 1); renderConstraints(); render();
+  }));
+}
+
+// ---------- build the input ----------
+function buildRoute(usedCons) {
+  const parts = [];
+  if (calc === "sp") {
+    parts.push($("mSP").value.trim());
+  } else {
+    parts.push($("mOpt").value.trim());
+    const o = [];
+    if (calc === "ts") o.push("TS", "CalcFC", "NoEigenTest");
+    if (usedCons.length) o.push("ModRedundant");
+    const conv = $("conv").value;
+    if (conv !== "Normal") o.push(conv);
+    parts.push(o.length === 0 ? "Opt" : o.length === 1 ? `Opt=${o[0]}` : `Opt=(${o.join(",")})`);
+    if ($("freq").checked) parts.push("Freq");
+  }
+  const solv = $("solvent").value.trim(); if (solv) parts.push(solv);
+  const extra = $("extra").value.trim(); if (extra) parts.push(extra);
+  return "#p " + parts.filter(Boolean).join(" ");
+}
+
+function defaultTitle() {
+  return `${$("name").value.trim() || "job"} ${TYPES.find(t => t.id === calc).label.toLowerCase()}`;
+}
+
+function build() {
+  const errors = [], warns = [];
+  if (!atoms.length) errors.push("No geometry loaded.");
+  const name = $("name").value.trim();
+  if (!name) errors.push("Job name is empty.");
+  else if (/[\s\\/:*?"<>|]/.test(name)) errors.push("Job name should not contain spaces or \\ / : * ? \" < > |.");
+  const method = (calc === "sp" ? $("mSP") : $("mOpt")).value.trim();
+  if (!method) errors.push("Method/basis is empty.");
+  const charge = $("charge").value.trim(), mult = $("mult").value.trim();
+  if (!/^-?\d+$/.test(charge)) errors.push("Charge must be a whole number.");
+  if (!/^\d+$/.test(mult) || Number(mult) < 1) errors.push("Multiplicity must be a whole number of 1 or more.");
+  if (!/^\d+$/.test($("nproc").value.trim()) || Number($("nproc").value) < 1) errors.push("Cores must be a whole number of 1 or more.");
+  if (!/^\d+\s*(KB|MB|GB|TB|KW|MW|GW|TW)?$/i.test($("mem").value.trim())) errors.push("Memory should look like 5GB or 5000MB.");
+
+  let usedCons = [];
+  if (calc === "copt" || calc === "ts" || calc === "scan") {
+    constraints.forEach((c, i) => {
+      if (!c.atoms.trim() && calc === "ts") return; // empty optional row
+      const r = checkConstraint(c);
+      if (r.error) errors.push(`Constraint row ${i + 1}: ${r.error}.`);
+      else { if (r.warn) warns.push(`Constraint row ${i + 1}: ${r.warn}.`); usedCons.push({ c, r }); }
+    });
+    if (calc === "copt" && !constraints.length) errors.push("Constrained optimisation needs at least one constraint.");
+    const nS = usedCons.filter(u => u.c.action === "S").length;
+    if (calc === "scan" && !constraints.some(c => c.action === "S")) errors.push("A relaxed scan needs at least one S (scan) constraint.");
+    if (calc === "scan" && nS >= 2) {
+      const pts = usedCons.filter(u => u.c.action === "S").reduce((p, u) => p * (u.c.steps + 1), 1);
+      warns.push(`This is a ${nS}D scan with ${pts} points in total.`);
+    }
+    const keys = usedCons.map(u => u.r.idx.join("-"));
+    const rev = usedCons.map(u => u.r.idx.slice().reverse().join("-"));
+    keys.forEach((k, i) => { if (keys.indexOf(k) !== i || keys.slice(0, i).includes(rev[i])) warns.push(`Constraint row ${i + 1} repeats an earlier row.`); });
+  }
+
+  const L = [];
+  L.push(`%nprocshared=${$("nproc").value.trim()}`);
+  L.push(`%mem=${$("mem").value.trim()}`);
+  L.push(`%chk=${name || "job"}.chk`);
+  L.push(buildRoute(usedCons));
+  L.push("");
+  L.push($("title").value.trim() || defaultTitle());
+  L.push("");
+  L.push(`${charge} ${mult}`);
+  atoms.forEach(a => L.push(`${a.el.padEnd(2)}  ${f6(a.x).padStart(14)}  ${f6(a.y).padStart(14)}  ${f6(a.z).padStart(14)}`));
+  L.push("");
+  if (usedCons.length) {
+    usedCons.forEach(({ c, r }) => {
+      L.push(c.action === "S"
+        ? `${r.letter} ${r.idx.join(" ")} S ${c.steps} ${Number(c.size).toFixed(6)}`
+        : `${r.letter} ${r.idx.join(" ")} F`);
+    });
+    L.push("");
+  }
+  return { text: L.join("\n") + "\n", errors, warns, name: name || "job" };
+}
+
+let last = null;
+function render() {
+  $("title").placeholder = defaultTitle();
+  last = build();
+  $("preview").textContent = last.text;
+  const box = $("checkMsg");
+  if (last.errors.length) box.innerHTML = `<div class="msg err"><b>Fix before using this file:</b><br>${last.errors.map(esc).join("<br>")}</div>`;
+  else if (last.warns.length) box.innerHTML = `<div class="msg warn">${last.warns.map(esc).join("<br>")}</div>`;
+  else box.innerHTML = `<div class="msg ok">All checks passed.</div>`;
+  $("copyBtn").disabled = $("dlBtn").disabled = last.errors.length > 0;
+}
+
+// ---------- settings fields ----------
+function fillSettings() {
+  $("mOpt").value = settings.mOpt; $("mSP").value = settings.mSP;
+  $("solvent").value = settings.solvent; $("extra").value = settings.extra;
+  $("charge").value = settings.charge; $("mult").value = settings.mult;
+  $("nproc").value = settings.nproc; $("mem").value = settings.mem;
+  syncCalcFields();
+}
+
+["mOpt", "mSP", "solvent", "extra", "charge", "mult", "nproc", "mem", "name"].forEach(id =>
+  $(id).addEventListener("input", render));
+$("title").addEventListener("input", () => { titleTouched = $("title").value.trim() !== ""; render(); });
+$("conv").addEventListener("change", () => { settings.conv[calc] = $("conv").value; render(); });
+$("freq").addEventListener("change", () => { settings.freq[calc] = $("freq").checked; render(); });
+
+$("saveDef").addEventListener("click", () => {
+  const s = {
+    mOpt: $("mOpt").value.trim(), mSP: $("mSP").value.trim(), solvent: $("solvent").value.trim(),
+    extra: $("extra").value.trim(), charge: Number($("charge").value), mult: Number($("mult").value),
+    nproc: Number($("nproc").value), mem: $("mem").value.trim(), conv: settings.conv, freq: settings.freq
+  };
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); $("defMsg").innerHTML = `<div class="msg ok">Saved. These settings load automatically next time (in this browser).</div>`; }
+  catch (e) { $("defMsg").innerHTML = `<div class="msg warn">This browser does not allow saving here. Settings are used for this session only.</div>`; }
+});
+$("resetDef").addEventListener("click", () => {
+  try { localStorage.removeItem(STORE_KEY); } catch (e) {}
+  settings = JSON.parse(JSON.stringify(FACTORY));
+  fillSettings(); render();
+  $("defMsg").innerHTML = `<div class="msg ok">Original defaults restored.</div>`;
+});
+
+// ---------- file / buttons ----------
+$("openBtn").addEventListener("click", () => $("fileIn").click());
+$("fileIn").addEventListener("change", () => {
+  const f = $("fileIn").files[0]; if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => { constraints = calc === "scan" ? [newCon("S")] : []; renderConstraints(); setGeometry(reader.result, f.name.replace(/\.[^.]+$/, "").replace(/\s+/g, "_")); };
+  reader.readAsText(f);
+  $("fileIn").value = "";
+});
+$("sampleBtn").addEventListener("click", () => setGeometry(SAMPLE_XYZ, SAMPLE_NAME));
+$("addCon").addEventListener("click", () => { constraints.push(newCon(calc === "scan" && !constraints.some(c => c.action === "S") ? "S" : "F")); renderConstraints(); render(); });
+
+$("copyBtn").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText(last.text); }
+  catch (e) {
+    const ta = document.createElement("textarea"); ta.value = last.text; document.body.appendChild(ta);
+    ta.select(); document.execCommand("copy"); ta.remove();
+  }
+  $("copyBtn").textContent = "Copied ✓"; setTimeout(() => $("copyBtn").textContent = "Copy", 1500);
+});
+$("dlBtn").addEventListener("click", () => {
+  const blob = new Blob([last.text], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = `${last.name}.gjf`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+// ---------- start ----------
+renderTypes(); fillSettings(); renderConstraints();
+setGeometry(SAMPLE_XYZ, SAMPLE_NAME);
+</script>
+</body>
+</html>
