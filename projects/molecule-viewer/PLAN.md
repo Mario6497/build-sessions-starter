@@ -24,6 +24,8 @@
 
 - **`scan2molden.sh`** (bash + awk, for the cluster): turns a Gaussian scan .log into a `.molden` file with only the converged point of every scan step and their energies (`[GEOCONV]`), so Molden shows the energy curve. `-x 8,12` leaves out outlier points, `--xyz` writes a plain multi-frame .xyz instead. Unix line endings.
 
+- **`molview.py`** (Linux program for the cluster, like Molden): Python + tkinter, standard library only. Start with `module load cray-python` then `python3 molview.py scan.log`. Same features as the HTML viewer (energy plot, rotatable structure, remove / undo / bring back points, measure, atom numbers), plus "Save .molden" in the same format as `scan2molden.sh`.
+
 ## Next (step 7, one at a time)
 
 - ORCA output (.out) and ORCA `_trj.xyz`.
