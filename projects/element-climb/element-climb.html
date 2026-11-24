@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Element Climb</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1b2233; }
+  body { display: flex; align-items: center; justify-content: center; font-family: system-ui, "Segoe UI", sans-serif; }
+  canvas { display: block; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+"use strict";
+// ---------- constants ----------
+const W = 480, H = 640, WALL = 34, GAP = 80;           // logical size, wall width, floor spacing
+const GRAV = 2300, ACC_G = 1500, ACC_A = 950, FRICTION = 1900, VMAX = 600;
+const JUMP_BASE = 720, JUMP_SPEED = 1.0;                 // jump speed = base + |vx| * factor
+const COMBO_TIME = 3.0, SPEEDUP_EVERY = 30;
+const PW = 22, PH = 38;                                  // player size
+const SYM = ["","H","He","Li","Be","B","C","N","O","F","Ne","Na","Mg","Al","Si","P","S","Cl","Ar","K","Ca","Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Ga","Ge","As","Se","Br","Kr","Rb","Sr","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","In","Sn","Sb","Te","I","Xe","Cs","Ba","La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu","Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg","Tl","Pb","Bi","Po","At","Rn","Fr","Ra","Ac","Th","Pa","U","Np","Pu","Am","Cm","Bk","Cf","Es","Fm","Md","No","Lr","Rf","Db","Sg","Bh","Hs","Mt","Ds","Rg","Cn","Nh","Fl","Mc","Lv","Ts","Og"];
+const NAMES = {10:"Neon",20:"Calcium",30:"Zinc",40:"Zirconium",50:"Tin",60:"Neodymium",70:"Ytterbium",80:"Mercury",90:"Thorium",100:"Fermium",110:"Darmstadtium"};
+const LIQUIDS = ["#3ccf7a","#3b8cff","#ff5a8a","#ffb020","#a66bff","#22d3d3"];
+const floorLabel = n => n <= 0 ? "Ground" : n <= 118 ? n + " · " + SYM[n] + (NAMES[n] ? " · " + NAMES[n] : "") : String(n);
+
+// ---------- canvas ----------
+const cv = document.getElementById("game"), ctx = cv.getContext("2d");
+function fit() {
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H) * 0.96;
+  const dpr = window.devicePixelRatio || 1;
+  cv.style.width = (W * s) + "px"; cv.style.height = (H * s) + "px";
+  cv.width = Math.round(W * s * dpr); cv.height = Math.round(H * s * dpr);
+  ctx.setTransform(cv.width / W, 0, 0, cv.height / H, 0, 0);
+}
+window.addEventListener("resize", fit); fit();
+
+// ---------- storage (best score) ----------
+function loadBest() { try { return JSON.parse(localStorage.getItem("elementClimbBest")) || { score: 0, floor: 0 }; } catch (e) { return { score: 0, floor: 0 }; } }
+function saveBest(b) { try { localStorage.setItem("elementClimbBest", JSON.stringify(b)); } catch (e) {} }
+
+// ---------- game state ----------
+const keys = {};
+let G;
+function newGame() {
+  G = {
+    state: "start", time: 0, scrollTime: 0, cam: -60, scrollSpeed: 0, level: 0, scrolling: false,
+    p: { x: W / 2, y: 0, vx: 0, vy: 0, onGround: true, floor: 0, face: 1, spin: 0, run: 0, coyote: 0, buffer: 0 },
+    plats: [], topFloor: -1, maxFloor: 0, lastFloor: 0,
+    combo: { active: false, floors: 0, jumps: 0, timer: 0 }, bestCombo: 0, bonus: 0,
+    popups: [], sparks: [], banner: null, best: loadBest(), newBest: false,
+  };
+  genPlatforms();
+}
+function platWidth(n) {
+  if (n % 50 === 0) return W - 2 * WALL;                    // full-width rest floor every 50
+  return Math.max(64, 190 - n * 0.9) + Math.random() * 40;
+}
+function genPlatforms() {
+  while (G.topFloor < 0 || G.topFloor * GAP < G.cam + H + 2 * GAP) {
+    const n = G.topFloor + 1, w = platWidth(n);
+    const x = n % 50 === 0 ? WALL : WALL + Math.random() * (W - 2 * WALL - w);
+    const flasks = [];
+    if (n > 0) for (let k = 0; k < 3; k++) if (Math.random() < 0.35) flasks.push({ fx: 8 + Math.random() * (w - 22), c: LIQUIDS[(Math.random() * LIQUIDS.length) | 0], tall: Math.random() < 0.5 });
+    G.plats.push({ n, x, w, y: n * GAP, flasks });
+    G.topFloor = n;
+  }
+  G.plats = G.plats.filter(pl => pl.y > G.cam - 2 * GAP);
+}
+
+// ---------- update ----------
+function score() { return G.maxFloor * 10 + G.bonus; }
+function endCombo() {
+  const c = G.combo;
+  if (c.active && c.floors > 0) {
+    const pts = c.floors * c.floors;
+    G.bonus += pts;
+    G.bestCombo = Math.max(G.bestCombo, c.floors);
+    G.popups.push({ text: (c.jumps > 1 ? c.jumps + " jumps · " : "") + c.floors + " floors  +" + pts, x: W / 2, y: H * 0.35, t: 1.6, big: c.floors >= 10 });
+  }
+  c.active = false; c.floors = 0; c.jumps = 0; c.timer = 0;
+}
+function land(pl) {
+  const p = G.p, diff = pl.n - G.lastFloor;
+  p.onGround = true; p.vy = 0; p.y = pl.y; p.floor = pl.n; p.spin = 0;
+  if (diff >= 2) {
+    const c = G.combo;
+    c.active = true; c.floors += diff; c.jumps += 1; c.timer = COMBO_TIME;
+  } else if (diff !== 0) endCombo();
+  G.lastFloor = pl.n;
+  if (pl.n > G.maxFloor) {
+    G.maxFloor = pl.n;
+    if (pl.n % 10 === 0) G.popups.push({ text: floorLabel(pl.n), x: W / 2, y: H * 0.25, t: 1.4, big: true });
+  }
+  if (!G.scrolling && pl.n >= 5) { G.scrolling = true; G.scrollSpeed = 45; G.level = 1; }
+}
+function step(dt) {
+  const p = G.p;
+  G.time += dt;
+  // input
+  const dir = (keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0);
+  if (dir) { p.vx += dir * (p.onGround ? ACC_G : ACC_A) * dt; p.face = dir; }
+  else if (p.onGround) { const f = FRICTION * dt; p.vx = Math.abs(p.vx) <= f ? 0 : p.vx - Math.sign(p.vx) * f; }
+  p.vx = Math.max(-VMAX, Math.min(VMAX, p.vx));
+  p.coyote = p.onGround ? 0.08 : Math.max(0, p.coyote - dt);
+  p.buffer = Math.max(0, p.buffer - dt);
+  if (p.buffer > 0 && (p.onGround || p.coyote > 0)) {
+    p.vy = JUMP_BASE + Math.abs(p.vx) * JUMP_SPEED;
+    p.onGround = false; p.coyote = 0; p.buffer = 0;
+    if (Math.abs(p.vx) > VMAX * 0.7) for (let k = 0; k < 8; k++) G.sparks.push({ x: p.x, y: p.y, vx: (Math.random() - .5) * 200, vy: Math.random() * 150, t: .5 });
+  }
+  // move horizontally, bounce off walls
+  p.x += p.vx * dt;
+  const minX = WALL + PW / 2, maxX = W - WALL - PW / 2;
+  if (p.x < minX || p.x > maxX) {
+    p.x = Math.max(minX, Math.min(maxX, p.x));
+    p.vx = Math.abs(p.vx) > 200 && !p.onGround ? -p.vx * 0.95 : (Math.abs(p.vx) > 200 ? -p.vx * 0.6 : 0);
+    if (p.vx) p.face = Math.sign(p.vx);
+  }
+  // vertical
+  if (p.onGround) {
+    const pl = G.plats.find(q => q.n === p.floor);
+    if (!pl || p.x + PW / 2 < pl.x || p.x - PW / 2 > pl.x + pl.w) { p.onGround = false; p.coyote = 0.08; }
+  }
+  if (!p.onGround) {
+    const prevY = p.y;
+    p.vy -= GRAV * dt; p.y += p.vy * dt;
+    if (G.combo.active) p.spin += dt * 12 * p.face;
+    if (p.vy <= 0) for (const pl of G.plats) {
+      if (prevY >= pl.y && p.y <= pl.y && p.x + PW / 2 > pl.x && p.x - PW / 2 < pl.x + pl.w) { land(pl); break; }
+    }
+  }
+  p.run += Math.abs(p.vx) * dt * 0.05;
+  // combo timer
+  if (G.combo.active) { G.combo.timer -= dt; if (G.combo.timer <= 0) endCombo(); }
+  // camera: follow upwards, auto-scroll gets faster
+  if (G.scrolling) {
+    G.scrollTime += dt;
+    const lvl = 1 + Math.floor(G.scrollTime / SPEEDUP_EVERY);
+    if (lvl > G.level) { G.level = lvl; G.scrollSpeed += 30; G.banner = { text: "Faster!  Speed " + lvl, t: 1.6 }; }
+    G.cam += G.scrollSpeed * dt;
+  }
+  G.cam = Math.max(G.cam, p.y - H * 0.55);
+  genPlatforms();
+  // effects
+  G.popups.forEach(o => { o.t -= dt; o.y -= 30 * dt; }); G.popups = G.popups.filter(o => o.t > 0);
+  G.sparks.forEach(s => { s.t -= dt; s.x += s.vx * dt; s.y += s.vy * dt; }); G.sparks = G.sparks.filter(s => s.t > 0);
+  if (G.banner) { G.banner.t -= dt; if (G.banner.t <= 0) G.banner = null; }
+  // fell below the screen
+  if (p.y + PH < G.cam - 10) gameOver();
+}
+function gameOver() {
+  endCombo();
+  G.state = "over";
+  const s = score();
+  if (s > G.best.score) { G.best = { score: s, floor: Math.max(G.best.floor, G.maxFloor) }; G.newBest = true; }
+  else G.best.floor = Math.max(G.best.floor, G.maxFloor);
+  saveBest(G.best);
+}
+
+// ---------- drawing ----------
+const sy = y => H - (y - G.cam);                         // world y (up) -> screen y (down)
+function rr(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, r) : ctx.rect(x, y, w, h); }
+function drawBackground() {
+  ctx.fillStyle = "#e9eef3"; ctx.fillRect(0, 0, W, H);
+  // faint periodic-table tiles on the lab wall (parallax)
+  const off = (G.cam * 0.3) % 48;
+  ctx.strokeStyle = "rgba(90,110,140,.10)"; ctx.lineWidth = 1;
+  for (let y = -48 + off; y < H; y += 48) for (let x = WALL + 6; x < W - WALL; x += 48) ctx.strokeRect(x, y, 42, 42);
+  // walls: lab tiles
+  for (const side of [0, W - WALL]) {
+    ctx.fillStyle = "#cfd8e3"; ctx.fillRect(side, 0, WALL, H);
+    ctx.strokeStyle = "#aab6c5";
+    const o = G.cam % 34;
+    for (let y = -34 + o; y < H; y += 34) { ctx.strokeRect(side + 1, y, WALL - 2, 34); }
+  }
+}
+function drawPlatforms() {
+  for (const pl of G.plats) {
+    const y = sy(pl.y);
+    if (y < -40 || y > H + 40) continue;
+    const milestone = pl.n % 10 === 0;
+    // flasks standing on the shelf
+    for (const f of pl.flasks) {
+      const fx = pl.x + f.fx, h = f.tall ? 22 : 14;
+      ctx.fillStyle = "rgba(255,255,255,.8)"; ctx.strokeStyle = "#7a8798"; ctx.lineWidth = 1.2;
+      if (f.tall) { rr(fx + 3, y - h, 8, h, 3); ctx.fill(); ctx.stroke(); ctx.fillStyle = f.c; ctx.fillRect(fx + 4, y - h * 0.55, 6, h * 0.55 - 1); }
+      else { ctx.beginPath(); ctx.moveTo(fx + 5, y - h); ctx.lineTo(fx + 9, y - h); ctx.lineTo(fx + 14, y - 1); ctx.lineTo(fx, y - 1); ctx.closePath(); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = f.c; ctx.beginPath(); ctx.moveTo(fx + 3, y - 6); ctx.lineTo(fx + 11, y - 6); ctx.lineTo(fx + 13, y - 2); ctx.lineTo(fx + 1, y - 2); ctx.closePath(); ctx.fill(); }
+    }
+    // the shelf
+    ctx.fillStyle = milestone ? "#2f6fdf" : pl.n === 0 ? "#5b6575" : "#8b6b4a";
+    rr(pl.x, y, pl.w, 12, 3); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.25)"; ctx.fillRect(pl.x + 2, y + 2, pl.w - 4, 3);
+    ctx.fillStyle = "#6c7684"; ctx.fillRect(pl.x + 8, y + 12, 4, 8); ctx.fillRect(pl.x + pl.w - 12, y + 12, 4, 8);
+    // element label
+    if (pl.n > 0) {
+      ctx.font = (milestone ? "700 12px " : "600 10px ") + "system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = "#fff"; ctx.fillText(milestone ? floorLabel(pl.n) : pl.n <= 118 ? pl.n + " " + SYM[pl.n] : String(pl.n), pl.x + pl.w / 2, y + 6.5);
+    }
+  }
+}
+function drawPlayer() {
+  const p = G.p, x = p.x, y = sy(p.y);
+  ctx.save(); ctx.translate(x, y - PH / 2);
+  if (!p.onGround && G.combo.active) ctx.rotate(p.spin);
+  ctx.scale(p.face, 1);
+  const legSwing = p.onGround && Math.abs(p.vx) > 20 ? Math.sin(p.run) * 6 : (p.onGround ? 0 : 4);
+  // legs
+  ctx.strokeStyle = "#2b3445"; ctx.lineWidth = 5; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(-4, 8); ctx.lineTo(-4 + legSwing, PH / 2 - 2); ctx.moveTo(4, 8); ctx.lineTo(4 - legSwing, PH / 2 - 2); ctx.stroke();
+  // lab coat
+  ctx.fillStyle = "#ffffff"; ctx.strokeStyle = "#8a96a8"; ctx.lineWidth = 1.5;
+  rr(-PW / 2, -6, PW, 20, 4); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = "#c3ccd8"; ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(0, 13); ctx.stroke();
+  ctx.fillStyle = "#2f6fdf"; ctx.fillRect(3, -2, 5, 3);                       // pen in the pocket
+  // arm
+  ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(2, -2); ctx.lineTo(9, p.onGround ? 8 : -10); ctx.stroke();
+  // head, hair, goggles
+  ctx.fillStyle = "#f2c9a0"; ctx.beginPath(); ctx.arc(0, -14, 8, 0, 2 * Math.PI); ctx.fill();
+  ctx.fillStyle = "#4a3426"; ctx.beginPath(); ctx.arc(-1, -17, 8, Math.PI * 1.05, Math.PI * 1.95); ctx.fill();
+  ctx.fillStyle = "#7fd3ff"; ctx.strokeStyle = "#2b3445"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(4, -14, 3.2, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+function drawHUD() {
+  ctx.textBaseline = "top"; ctx.textAlign = "left";
+  ctx.fillStyle = "rgba(20,28,45,.78)"; rr(WALL + 6, 8, 150, 44, 8); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.font = "700 18px system-ui, sans-serif"; ctx.fillText("Score " + score(), WALL + 14, 13);
+  ctx.font = "12px system-ui, sans-serif"; ctx.fillText("Floor " + floorLabel(G.p.floor).split(" · ").slice(0, 2).join(" · "), WALL + 14, 34);
+  // speed clock
+  const cx = W - WALL - 28, cy = 30;
+  ctx.fillStyle = "rgba(20,28,45,.78)"; ctx.beginPath(); ctx.arc(cx, cy, 20, 0, 2 * Math.PI); ctx.fill();
+  if (G.scrolling) {
+    const frac = (G.scrollTime % SPEEDUP_EVERY) / SPEEDUP_EVERY;
+    ctx.strokeStyle = "#ffb020"; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(cx, cy, 15, -Math.PI / 2, -Math.PI / 2 + frac * 2 * Math.PI); ctx.stroke();
+  }
+  ctx.fillStyle = "#fff"; ctx.font = "700 13px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(G.scrolling ? String(G.level) : "–", cx, cy + 1);
+  // combo bar
+  if (G.combo.active) {
+    const bx = WALL + 10, by = 60, bh = 160;
+    ctx.fillStyle = "rgba(20,28,45,.6)"; rr(bx, by, 14, bh, 6); ctx.fill();
+    const f = Math.max(0, G.combo.timer / COMBO_TIME);
+    ctx.fillStyle = f > 0.35 ? "#3ccf7a" : "#ff5a5a"; rr(bx + 2, by + 2 + (bh - 4) * (1 - f), 10, (bh - 4) * f, 4); ctx.fill();
+    ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.font = "800 20px system-ui, sans-serif";
+    ctx.lineWidth = 4; ctx.strokeStyle = "rgba(20,28,45,.8)"; ctx.strokeText("COMBO " + G.combo.floors, bx + 22, by + 12); ctx.fillStyle = "#ffd23f"; ctx.fillText("COMBO " + G.combo.floors, bx + 22, by + 12);
+  }
+  for (const o of G.popups) {
+    ctx.globalAlpha = Math.min(1, o.t); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = (o.big ? "800 26px " : "700 18px ") + "system-ui, sans-serif";
+    ctx.lineWidth = 5; ctx.strokeStyle = "rgba(20,28,45,.85)"; ctx.strokeText(o.text, o.x, o.y); ctx.fillStyle = "#ffd23f"; ctx.fillText(o.text, o.x, o.y);
+    ctx.globalAlpha = 1;
+  }
+  if (G.banner) {
+    ctx.globalAlpha = Math.min(1, G.banner.t); ctx.font = "800 30px system-ui, sans-serif"; ctx.textAlign = "center";
+    ctx.lineWidth = 6; ctx.strokeStyle = "rgba(20,28,45,.85)"; ctx.strokeText(G.banner.text, W / 2, H * 0.45); ctx.fillStyle = "#ff8a3d"; ctx.fillText(G.banner.text, W / 2, H * 0.45);
+    ctx.globalAlpha = 1;
+  }
+  for (const s of G.sparks) { ctx.fillStyle = "rgba(255,210,63," + (s.t * 2) + ")"; ctx.fillRect(s.x - 2, sy(s.y) - 2, 4, 4); }
+}
+function panel(lines) {
+  ctx.fillStyle = "rgba(15,20,32,.82)"; rr(50, 150, W - 100, 300, 14); ctx.fill();
+  ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = "#fff";
+  let y = 190;
+  for (const [txt, size, color] of lines) { ctx.font = size + "px system-ui, sans-serif"; ctx.fillStyle = color || "#fff"; ctx.fillText(txt, W / 2, y); y += size * 1.6; }
+}
+function draw() {
+  drawBackground(); drawPlatforms(); drawPlayer(); drawHUD();
+  if (G.state === "start") panel([["ELEMENT CLIMB", 30, "#ffd23f"], ["Climb the lab shelves, one element per floor.", 14], ["← →  run      Space / ↑  jump", 16], ["Run fast for higher jumps.", 14], ["Skip 2+ floors per jump for combos!", 14], ["P pause · R restart", 13, "#aab6c5"], ["Best: " + G.best.score + " points · floor " + G.best.floor, 13, "#aab6c5"], ["Press Space to start", 18, "#3ccf7a"]]);
+  if (G.state === "pause") panel([["Paused", 30, "#ffd23f"], ["Press P to continue", 16]]);
+  if (G.state === "over") panel([["Game over", 30, "#ff8a3d"], ["Score " + score(), 24], ["Floor " + floorLabel(G.maxFloor), 16], ["Best combo: " + G.bestCombo + " floors", 15], [G.newBest ? "New best score!" : "Best: " + G.best.score, 16, G.newBest ? "#3ccf7a" : "#aab6c5"], ["Press R to play again", 18, "#3ccf7a"]]);
+}
+
+// ---------- input & loop ----------
+document.addEventListener("keydown", e => {
+  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " "].includes(e.key)) e.preventDefault();
+  if ((e.key === " " || e.key === "ArrowUp") && !e.repeat) {
+    if (G.state === "start") G.state = "play";
+    else if (G.state === "play") G.p.buffer = 0.12;
+  }
+  if (e.key === "p" || e.key === "P") { if (G.state === "play") G.state = "pause"; else if (G.state === "pause") G.state = "play"; }
+  if (e.key === "r" || e.key === "R") { newGame(); G.state = "play"; }
+  keys[e.key] = true;
+});
+document.addEventListener("keyup", e => { keys[e.key] = false; });
+window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; if (G.state === "play") G.state = "pause"; });
+
+newGame();
+let last = performance.now(), acc = 0;
+const DT = 1 / 120;
+function frame(now) {
+  acc += Math.min(0.1, (now - last) / 1000); last = now;
+  while (acc >= DT) { if (G.state === "play") step(DT); acc -= DT; }
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+window.game = { get G() { return G; }, step, newGame, keys, score };   // used by the automatic check
+</script>
+</body>
+</html>
