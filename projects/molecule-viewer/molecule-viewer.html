@@ -1,0 +1,1110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Molecule Viewer</title>
+<style>
+  :root {
+    --bg: #f4f6fa; --panel: #ffffff; --ink: #1d2330; --muted: #667085; --line: #d9dee8;
+    --accent: #2f6fdf; --danger: #d43c3c; --warn: #e08a00; --sel: #f5c400;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 18px; margin: 0 8px 0 0; }
+  #fileinfo { color: var(--muted); }
+  button, .btn { font: inherit; padding: 6px 12px; border: 1px solid var(--line); background: #fff; border-radius: 6px; cursor: pointer; color: var(--ink); }
+  button:hover:not(:disabled), .btn:hover { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.danger { color: var(--danger); }
+  input[type=file] { display: none; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; padding: 16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-width: 0; }
+  section h2 { font-size: 15px; margin: 0 0 6px; }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 4px 0 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  #plot { width: 100%; height: 320px; display: block; user-select: none; }
+  #plot .pt { cursor: pointer; }
+  #viewer { width: 100%; height: 420px; display: block; border-radius: 8px; background: radial-gradient(circle at 40% 35%, #ffffff, #e6eaf2); cursor: grab; touch-action: none; }
+  #viewer:active { cursor: grabbing; }
+  #measure { min-height: 22px; font-weight: 600; }
+  #banner { display: none; margin: 12px 16px 0; padding: 10px 12px; border-radius: 8px; background: #fff4e5; border: 1px solid #f3c27a; }
+  #banner.error { background: #fdecec; border-color: #eea0a0; }
+  .tablewrap { max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 4px 8px; text-align: right; border-bottom: 1px solid #eef1f6; white-space: nowrap; }
+  th { position: sticky; top: 0; background: #f7f9fc; font-weight: 600; }
+  th:last-child, td:last-child { text-align: center; }
+  tr.current td { background: #e9f0fd; }
+  tr.selected td { background: #fde9e9; }
+  tr.removed td { color: #a0a7b4; text-decoration: line-through; }
+  tr.removed td:last-child { text-decoration: none; }
+  tr { cursor: pointer; }
+  td button { padding: 1px 8px; font-size: 12px; }
+  .drop { outline: 3px dashed var(--accent); outline-offset: -8px; }
+  label.chk { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 12px; background: #fafbfc; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Molecule viewer</h1>
+  <label class="btn primary" style="background:var(--accent);color:#fff;border-color:var(--accent)">Open file…
+    <input type="file" id="fileinput" accept=".log,.out,.xyz,.txt">
+  </label>
+  <button id="loadsample">Load sample scan</button>
+  <span id="fileinfo"></span>
+</header>
+<div id="banner"></div>
+<main>
+  <section>
+    <h2>Energy plot</h2>
+    <p class="hint">Click a point to see its structure. <kbd>Ctrl</kbd>+click marks several points. <kbd>←</kbd> <kbd>→</kbd> step through points, <kbd>Delete</kbd> removes the marked points (or the current one). ΔE is relative to the lowest remaining point.</p>
+    <svg id="plot"></svg>
+    <div class="row">
+      <button id="btnremove" class="danger">Remove point</button>
+      <button id="btnundo">Undo</button>
+      <button id="btnrestore">Bring all back</button>
+      <button id="btnsave" class="primary">Save cleaned .xyz</button>
+    </div>
+    <p class="hint">Saving writes the remaining points (with their energies in the comment lines) as a multi-frame .xyz. It opens in Molden, VMD and again here. The original file is never changed.</p>
+    <div class="tablewrap"><table id="table"></table></div>
+  </section>
+  <section>
+    <h2 id="structtitle">Structure</h2>
+    <p class="hint">Drag to rotate, mouse wheel to zoom. Click 2, 3 or 4 atoms to measure a bond, angle or dihedral. Click empty space to clear.</p>
+    <canvas id="viewer"></canvas>
+    <div class="row">
+      <label class="chk"><input type="checkbox" id="chklabels" checked> Atom numbers</label>
+      <button id="btnresetview">Reset view</button>
+      <button id="btnclearmeasure">Clear measurement</button>
+    </div>
+    <div id="measure"></div>
+    <p class="hint">Atom numbers are the same as in the Gaussian input (starting at 1). The measurement stays when you move to another point, so you can follow a bond through a scan.</p>
+  </section>
+</main>
+
+<script>
+"use strict";
+const SAMPLE_NAME = "sample-scan.log";
+const SAMPLE_LOG = String.raw` Entering Gaussian System, Link 0=g16
+ Input=sample-scan.com
+ Output=sample-scan.log
+ ******************************************
+ Gaussian 16:  ES64L-G16RevC.01  3-Jul-2019
+                24-Nov-2026 
+ ******************************************
+ %nprocshared=16
+ %mem=5GB
+ %chk=sample-scan.chk
+ ----------------------------------------------------------------------
+ #p wB97XD/6-31G** Opt=ModRedundant SCRF=(PCM,Solvent=Acetonitrile)
+ ----------------------------------------------------------------------
+ ----------------
+ made-up sample
+ ----------------
+ Symbolic Z-matrix:
+ Charge =  0 Multiplicity = 1
+ The following ModRedundant input section has been read:
+ B       1       2 S  10 0.0500
+ Step number   1 out of a maximum of   58 on scan point     1 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.530000
+      3          1           0        1.028000    0.000000   -0.393000
+      4          1           0       -0.514000    0.890274   -0.393000
+      5          1           0       -0.514000   -0.890274   -0.393000
+      6          1           0        0.514000    0.890274    1.923000
+      7          1           0       -1.028000    0.000000    1.923000
+      8          1           0        0.514000   -0.890274    1.923000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8280234567     A.U. after   11 cycles
+ Step number   2 out of a maximum of   58 on scan point     1 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.530000
+      3          1           0        1.028000    0.000000   -0.375000
+      4          1           0       -0.514000    0.890274   -0.375000
+      5          1           0       -0.514000   -0.890274   -0.375000
+      6          1           0        0.514000    0.890274    1.905000
+      7          1           0       -1.028000    0.000000    1.905000
+      8          1           0        0.514000   -0.890274    1.905000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8297234567     A.U. after   11 cycles
+ Step number   3 out of a maximum of   58 on scan point     1 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.530000
+      3          1           0        1.028000    0.000000   -0.363000
+      4          1           0       -0.514000    0.890274   -0.363000
+      5          1           0       -0.514000   -0.890274   -0.363000
+      6          1           0        0.514000    0.890274    1.893000
+      7          1           0       -1.028000    0.000000    1.893000
+      8          1           0        0.514000   -0.890274    1.893000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8301234567     A.U. after   11 cycles
+         Optimization completed.
+            -- Stationary point found.
+ Step number   1 out of a maximum of   58 on scan point     2 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.580000
+      3          1           0        1.028000    0.000000   -0.393000
+      4          1           0       -0.514000    0.890274   -0.393000
+      5          1           0       -0.514000   -0.890274   -0.393000
+      6          1           0        0.514000    0.890274    1.973000
+      7          1           0       -1.028000    0.000000    1.973000
+      8          1           0        0.514000   -0.890274    1.973000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8268735996     A.U. after   11 cycles
+ Step number   2 out of a maximum of   58 on scan point     2 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.580000
+      3          1           0        1.028000    0.000000   -0.375000
+      4          1           0       -0.514000    0.890274   -0.375000
+      5          1           0       -0.514000   -0.890274   -0.375000
+      6          1           0        0.514000    0.890274    1.955000
+      7          1           0       -1.028000    0.000000    1.955000
+      8          1           0        0.514000   -0.890274    1.955000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8285735996     A.U. after   11 cycles
+ Step number   3 out of a maximum of   58 on scan point     2 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.580000
+      3          1           0        1.028000    0.000000   -0.363000
+      4          1           0       -0.514000    0.890274   -0.363000
+      5          1           0       -0.514000   -0.890274   -0.363000
+      6          1           0        0.514000    0.890274    1.943000
+      7          1           0       -1.028000    0.000000    1.943000
+      8          1           0        0.514000   -0.890274    1.943000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8289735996     A.U. after   11 cycles
+         Optimization completed.
+            -- Stationary point found.
+ Step number   1 out of a maximum of   58 on scan point     3 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.630000
+      3          1           0        1.028000    0.000000   -0.393000
+      4          1           0       -0.514000    0.890274   -0.393000
+      5          1           0       -0.514000   -0.890274   -0.393000
+      6          1           0        0.514000    0.890274    2.023000
+      7          1           0       -1.028000    0.000000    2.023000
+      8          1           0        0.514000   -0.890274    2.023000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8238314169     A.U. after   11 cycles
+ Step number   2 out of a maximum of   58 on scan point     3 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.630000
+      3          1           0        1.028000    0.000000   -0.375000
+      4          1           0       -0.514000    0.890274   -0.375000
+      5          1           0       -0.514000   -0.890274   -0.375000
+      6          1           0        0.514000    0.890274    2.005000
+      7          1           0       -1.028000    0.000000    2.005000
+      8          1           0        0.514000   -0.890274    2.005000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8255314169     A.U. after   11 cycles
+ Step number   3 out of a maximum of   58 on scan point     3 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.630000
+      3          1           0        1.028000    0.000000   -0.363000
+      4          1           0       -0.514000    0.890274   -0.363000
+      5          1           0       -0.514000   -0.890274   -0.363000
+      6          1           0        0.514000    0.890274    1.993000
+      7          1           0       -1.028000    0.000000    1.993000
+      8          1           0        0.514000   -0.890274    1.993000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8259314169     A.U. after   11 cycles
+         Optimization completed.
+            -- Stationary point found.
+ Step number   1 out of a maximum of   58 on scan point     4 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.680000
+      3          1           0        1.028000    0.000000   -0.393000
+      4          1           0       -0.514000    0.890274   -0.393000
+      5          1           0       -0.514000   -0.890274   -0.393000
+      6          1           0        0.514000    0.890274    2.073000
+      7          1           0       -1.028000    0.000000    2.073000
+      8          1           0        0.514000   -0.890274    2.073000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8194138865     A.U. after   11 cycles
+ Step number   2 out of a maximum of   58 on scan point     4 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.680000
+      3          1           0        1.028000    0.000000   -0.375000
+      4          1           0       -0.514000    0.890274   -0.375000
+      5          1           0       -0.514000   -0.890274   -0.375000
+      6          1           0        0.514000    0.890274    2.055000
+      7          1           0       -1.028000    0.000000    2.055000
+      8          1           0        0.514000   -0.890274    2.055000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8211138865     A.U. after   11 cycles
+ Step number   3 out of a maximum of   58 on scan point     4 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.680000
+      3          1           0        1.028000    0.000000   -0.363000
+      4          1           0       -0.514000    0.890274   -0.363000
+      5          1           0       -0.514000   -0.890274   -0.363000
+      6          1           0        0.514000    0.890274    2.043000
+      7          1           0       -1.028000    0.000000    2.043000
+      8          1           0        0.514000   -0.890274    2.043000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8215138865     A.U. after   11 cycles
+         Optimization completed.
+            -- Stationary point found.
+ Step number   1 out of a maximum of   58 on scan point     5 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.730000
+      3          1           0        1.028000    0.000000   -0.393000
+      4          1           0       -0.514000    0.890274   -0.393000
+      5          1           0       -0.514000   -0.890274   -0.393000
+      6          1           0        0.514000    0.890274    2.123000
+      7          1           0       -1.028000    0.000000    2.123000
+      8          1           0        0.514000   -0.890274    2.123000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8140313515     A.U. after   11 cycles
+ Step number   2 out of a maximum of   58 on scan point     5 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.730000
+      3          1           0        1.028000    0.000000   -0.375000
+      4          1           0       -0.514000    0.890274   -0.375000
+      5          1           0       -0.514000   -0.890274   -0.375000
+      6          1           0        0.514000    0.890274    2.105000
+      7          1           0       -1.028000    0.000000    2.105000
+      8          1           0        0.514000   -0.890274    2.105000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8157313515     A.U. after   11 cycles
+ Step number   3 out of a maximum of   58 on scan point     5 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.730000
+      3          1           0        1.028000    0.000000   -0.363000
+      4          1           0       -0.514000    0.890274   -0.363000
+      5          1           0       -0.514000   -0.890274   -0.363000
+      6          1           0        0.514000    0.890274    2.093000
+      7          1           0       -1.028000    0.000000    2.093000
+      8          1           0        0.514000   -0.890274    2.093000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8161313515     A.U. after   11 cycles
+         Optimization completed.
+            -- Stationary point found.
+ Step number   1 out of a maximum of   58 on scan point     6 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.780000
+      3          1           0        1.028000    0.000000   -0.393000
+      4          1           0       -0.514000    0.890274   -0.393000
+      5          1           0       -0.514000   -0.890274   -0.393000
+      6          1           0        0.514000    0.890274    2.173000
+      7          1           0       -1.028000    0.000000    2.173000
+      8          1           0        0.514000   -0.890274    2.173000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8080075292     A.U. after   11 cycles
+ Step number   2 out of a maximum of   58 on scan point     6 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.780000
+      3          1           0        1.028000    0.000000   -0.375000
+      4          1           0       -0.514000    0.890274   -0.375000
+      5          1           0       -0.514000   -0.890274   -0.375000
+      6          1           0        0.514000    0.890274    2.155000
+      7          1           0       -1.028000    0.000000    2.155000
+      8          1           0        0.514000   -0.890274    2.155000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8097075292     A.U. after   11 cycles
+ Step number   3 out of a maximum of   58 on scan point     6 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.780000
+      3          1           0        1.028000    0.000000   -0.363000
+      4          1           0       -0.514000    0.890274   -0.363000
+      5          1           0       -0.514000   -0.890274   -0.363000
+      6          1           0        0.514000    0.890274    2.143000
+      7          1           0       -1.028000    0.000000    2.143000
+      8          1           0        0.514000   -0.890274    2.143000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8101075292     A.U. after   11 cycles
+         Optimization completed.
+            -- Stationary point found.
+ Step number   1 out of a maximum of   58 on scan point     7 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.830000
+      3          1           0        1.028000    0.000000   -0.393000
+      4          1           0       -0.514000    0.890274   -0.393000
+      5          1           0       -0.514000   -0.890274   -0.393000
+      6          1           0        0.514000    0.890274    2.223000
+      7          1           0       -1.028000    0.000000    2.223000
+      8          1           0        0.514000   -0.890274    2.223000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8015959165     A.U. after   11 cycles
+ Step number   2 out of a maximum of   58 on scan point     7 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.830000
+      3          1           0        1.028000    0.000000   -0.375000
+      4          1           0       -0.514000    0.890274   -0.375000
+      5          1           0       -0.514000   -0.890274   -0.375000
+      6          1           0        0.514000    0.890274    2.205000
+      7          1           0       -1.028000    0.000000    2.205000
+      8          1           0        0.514000   -0.890274    2.205000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8032959165     A.U. after   11 cycles
+ Step number   3 out of a maximum of   58 on scan point     7 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.830000
+      3          1           0        1.028000    0.000000   -0.363000
+      4          1           0       -0.514000    0.890274   -0.363000
+      5          1           0       -0.514000   -0.890274   -0.363000
+      6          1           0        0.514000    0.890274    2.193000
+      7          1           0       -1.028000    0.000000    2.193000
+      8          1           0        0.514000   -0.890274    2.193000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.8036959165     A.U. after   11 cycles
+         Optimization completed.
+            -- Stationary point found.
+ Step number   1 out of a maximum of   58 on scan point     8 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.880000
+      3          1           0        1.028000    0.000000   -0.393000
+      4          1           0       -0.514000    0.890274   -0.393000
+      5          1           0       -0.514000   -0.890274   -0.393000
+      6          1           0        0.514000    0.890274    2.273000
+      7          1           0       -1.028000    0.000000    2.273000
+      8          1           0        0.514000   -0.890274    2.273000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.4449932279     A.U. after   11 cycles
+ Step number   2 out of a maximum of   58 on scan point     8 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.880000
+      3          1           0        1.028000    0.000000   -0.375000
+      4          1           0       -0.514000    0.890274   -0.375000
+      5          1           0       -0.514000   -0.890274   -0.375000
+      6          1           0        0.514000    0.890274    2.255000
+      7          1           0       -1.028000    0.000000    2.255000
+      8          1           0        0.514000   -0.890274    2.255000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.4466932279     A.U. after   11 cycles
+ Step number   3 out of a maximum of   58 on scan point     8 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.880000
+      3          1           0        1.028000    0.000000   -0.363000
+      4          1           0       -0.514000    0.890274   -0.363000
+      5          1           0       -0.514000   -0.890274   -0.363000
+      6          1           0        0.514000    0.890274    2.243000
+      7          1           0       -1.028000    0.000000    2.243000
+      8          1           0        0.514000   -0.890274    2.243000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.4470932279     A.U. after   11 cycles
+         Optimization completed.
+            -- Stationary point found.
+ Step number   1 out of a maximum of   58 on scan point     9 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.930000
+      3          1           0        1.028000    0.000000   -0.393000
+      4          1           0       -0.514000    0.890274   -0.393000
+      5          1           0       -0.514000   -0.890274   -0.393000
+      6          1           0        0.514000    0.890274    2.323000
+      7          1           0       -1.028000    0.000000    2.323000
+      8          1           0        0.514000   -0.890274    2.323000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.7883503921     A.U. after   11 cycles
+ Step number   2 out of a maximum of   58 on scan point     9 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.930000
+      3          1           0        1.028000    0.000000   -0.375000
+      4          1           0       -0.514000    0.890274   -0.375000
+      5          1           0       -0.514000   -0.890274   -0.375000
+      6          1           0        0.514000    0.890274    2.305000
+      7          1           0       -1.028000    0.000000    2.305000
+      8          1           0        0.514000   -0.890274    2.305000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.7900503921     A.U. after   11 cycles
+ Step number   3 out of a maximum of   58 on scan point     9 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.930000
+      3          1           0        1.028000    0.000000   -0.363000
+      4          1           0       -0.514000    0.890274   -0.363000
+      5          1           0       -0.514000   -0.890274   -0.363000
+      6          1           0        0.514000    0.890274    2.293000
+      7          1           0       -1.028000    0.000000    2.293000
+      8          1           0        0.514000   -0.890274    2.293000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.7904503921     A.U. after   11 cycles
+         Optimization completed.
+            -- Stationary point found.
+ Step number   1 out of a maximum of   58 on scan point    10 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.980000
+      3          1           0        1.028000    0.000000   -0.393000
+      4          1           0       -0.514000    0.890274   -0.393000
+      5          1           0       -0.514000   -0.890274   -0.393000
+      6          1           0        0.514000    0.890274    2.373000
+      7          1           0       -1.028000    0.000000    2.373000
+      8          1           0        0.514000   -0.890274    2.373000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.7817815392     A.U. after   11 cycles
+ Step number   2 out of a maximum of   58 on scan point    10 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.980000
+      3          1           0        1.028000    0.000000   -0.375000
+      4          1           0       -0.514000    0.890274   -0.375000
+      5          1           0       -0.514000   -0.890274   -0.375000
+      6          1           0        0.514000    0.890274    2.355000
+      7          1           0       -1.028000    0.000000    2.355000
+      8          1           0        0.514000   -0.890274    2.355000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.7834815392     A.U. after   11 cycles
+ Step number   3 out of a maximum of   58 on scan point    10 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    1.980000
+      3          1           0        1.028000    0.000000   -0.363000
+      4          1           0       -0.514000    0.890274   -0.363000
+      5          1           0       -0.514000   -0.890274   -0.363000
+      6          1           0        0.514000    0.890274    2.343000
+      7          1           0       -1.028000    0.000000    2.343000
+      8          1           0        0.514000   -0.890274    2.343000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.7838815392     A.U. after   11 cycles
+         Optimization completed.
+            -- Stationary point found.
+ Step number   1 out of a maximum of   58 on scan point    11 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    2.030000
+      3          1           0        1.028000    0.000000   -0.393000
+      4          1           0       -0.514000    0.890274   -0.393000
+      5          1           0       -0.514000   -0.890274   -0.393000
+      6          1           0        0.514000    0.890274    2.423000
+      7          1           0       -1.028000    0.000000    2.423000
+      8          1           0        0.514000   -0.890274    2.423000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.7753713366     A.U. after   11 cycles
+ Step number   2 out of a maximum of   58 on scan point    11 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    2.030000
+      3          1           0        1.028000    0.000000   -0.375000
+      4          1           0       -0.514000    0.890274   -0.375000
+      5          1           0       -0.514000   -0.890274   -0.375000
+      6          1           0        0.514000    0.890274    2.405000
+      7          1           0       -1.028000    0.000000    2.405000
+      8          1           0        0.514000   -0.890274    2.405000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.7770713366     A.U. after   11 cycles
+ Step number   3 out of a maximum of   58 on scan point    11 out of    11
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.000000    0.000000    0.000000
+      2          6           0        0.000000    0.000000    2.030000
+      3          1           0        1.028000    0.000000   -0.363000
+      4          1           0       -0.514000    0.890274   -0.363000
+      5          1           0       -0.514000   -0.890274   -0.363000
+      6          1           0        0.514000    0.890274    2.393000
+      7          1           0       -1.028000    0.000000    2.393000
+      8          1           0        0.514000   -0.890274    2.393000
+ ---------------------------------------------------------------------
+ SCF Done:  E(RwB97XD) =  -79.7774713366     A.U. after   11 cycles
+         Optimization completed.
+            -- Stationary point found.
+ Summary of Optimized Potential Surface Scan (add -79.0 to energies):
+ Normal termination of Gaussian 16 at Tue Nov 24 10:00:00 2026.
+`;
+
+// ---------- element data ----------
+const SYMBOLS = ["X","H","He","Li","Be","B","C","N","O","F","Ne","Na","Mg","Al","Si","P","S","Cl","Ar","K","Ca","Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Ga","Ge","As","Se","Br","Kr","Rb","Sr","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","In","Sn","Sb","Te","I","Xe","Cs","Ba","La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu","Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg","Tl","Pb","Bi","Po","At","Rn"];
+const COV = {H:.31,He:.28,Li:1.28,Be:.96,B:.84,C:.76,N:.71,O:.66,F:.57,Ne:.58,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,Ar:1.06,K:2.03,Ca:1.76,Ti:1.6,V:1.53,Cr:1.39,Mn:1.39,Fe:1.32,Co:1.26,Ni:1.24,Cu:1.32,Zn:1.22,Ga:1.22,Ge:1.2,As:1.19,Se:1.2,Br:1.2,Kr:1.16,Ru:1.46,Rh:1.42,Pd:1.39,Ag:1.45,Cd:1.44,Sn:1.39,Sb:1.39,Te:1.38,I:1.39,Xe:1.4,Pt:1.36,Au:1.36,Hg:1.32,Pb:1.46,Bi:1.48};
+const COLORS = {H:"#ffffff",C:"#909090",N:"#3050f8",O:"#ff0d0d",F:"#90e050",Cl:"#1ff01f",Br:"#a62929",I:"#940094",S:"#ffff30",P:"#ff8000",B:"#ffb5b5",Si:"#f0c8a0",Fe:"#e06633",Cu:"#c88033",Zn:"#7d80b0",Pd:"#006985",Pt:"#d0d0e0",Au:"#ffd123",Na:"#ab5cf2",K:"#8f40d4",Li:"#cc80ff",Mg:"#8aff00"};
+const HARTREE_TO_KCAL = 627.5095;
+const symbolOf = z => SYMBOLS[z] || "X";
+function normSymbol(s) {
+  if (/^\d+$/.test(s)) return symbolOf(+s);
+  const m = s.match(/^[A-Za-z]{1,2}/); if (!m) return "X";
+  const t = m[0][0].toUpperCase() + m[0].slice(1).toLowerCase();
+  return SYMBOLS.includes(t) ? t : t[0];
+}
+
+// ---------- parsers ----------
+const FLOAT = "-?\\d+\\.\\d+(?:[eEdD][-+]?\\d+)?";
+
+function parseGaussian(text) {
+  let lines = text.split(/\r?\n/);
+  // only the first job of the file (ignore --Link1-- parts such as freq or a single point)
+  const endIdx = lines.findIndex(l => l.includes("Normal termination of Gaussian"));
+  if (endIdx >= 0) lines = lines.slice(0, endIdx + 1);
+  const firstJob = lines.join("\n");
+  const orient = ["Input orientation:", "Z-Matrix orientation:", "Standard orientation:"].find(t => firstJob.includes(t));
+  if (!orient) throw new Error("No geometry found in this Gaussian file.");
+
+  // route line (may continue over several lines until the dashes)
+  let route = "";
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s#/.test(lines[i])) {
+      for (let j = i; j < lines.length && !/^\s-{5,}/.test(lines[j]); j++) route += lines[j].trim();
+      break;
+    }
+  }
+  const isOpt = /(^|[\s#\/])opt\b/i.test(route);
+
+  // scan coordinate from the ModRedundant echo
+  let scanCoord = null;
+  const modIdx = lines.findIndex(l => l.includes("ModRedundant input section has been read"));
+  if (modIdx >= 0) {
+    for (let j = modIdx + 1; j < Math.min(lines.length, modIdx + 50); j++) {
+      const m = lines[j].match(/^\s*([BADL])((?:\s+\d+){2,4})\s+S\s+\d+/i);
+      if (m) { scanCoord = { type: m[1].toUpperCase(), atoms: m[2].trim().split(/\s+/).map(n => +n - 1) }; break; }
+      if (/^\s*$/.test(lines[j]) || /^\s[A-Z][a-z]/.test(lines[j]) && !/^\s*[BADLX]\s/.test(lines[j])) break;
+    }
+  }
+  const isScan = isOpt && (scanCoord !== null || /Potential Surface Scan/.test(firstJob) || /scan point/.test(firstJob));
+
+  const steps = [];
+  let geom = null;
+  const scfRe = new RegExp("SCF Done:\\s+E\\([^)]*\\)\\s*=\\s*(" + FLOAT + ")");
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.includes(orient)) {
+      const atoms = [];
+      let j = i + 5;
+      for (; j < lines.length && !/^\s*-{5,}/.test(lines[j]); j++) {
+        const p = lines[j].trim().split(/\s+/);
+        if (p.length < 5) continue;
+        const z = +p[1], n = p.length;
+        atoms.push({ el: symbolOf(z), x: +p[n - 3], y: +p[n - 2], z: +p[n - 1] });
+      }
+      geom = atoms; i = j; continue;
+    }
+    const m = l.match(scfRe);
+    if (m && geom) { steps.push({ atoms: geom, energy: parseFloat(m[1].replace(/[dD]/, "e")), status: "" }); continue; }
+    if (l.includes("Optimization completed") && steps.length) steps[steps.length - 1].status = "converged";
+    else if (l.includes("Optimization stopped") && steps.length) steps[steps.length - 1].status = "not converged";
+  }
+  if (!steps.length) throw new Error("Found geometries but no 'SCF Done' energies in this Gaussian file.");
+
+  let frames, kind;
+  if (isScan) {
+    frames = steps.filter(s => s.status);
+    kind = "scan";
+    if (!frames.length) throw new Error("This scan has no finished scan points yet.");
+  } else if (isOpt) {
+    const end = steps.findIndex(s => s.status);
+    frames = end >= 0 ? steps.slice(0, end + 1) : steps;
+    kind = "opt";
+  } else {
+    frames = steps.length > 1 ? steps : [steps[steps.length - 1]];
+    kind = steps.length > 1 ? "steps" : "single";
+  }
+  return { kind, frames, scanCoord, route };
+}
+
+function parseXyz(text) {
+  const lines = text.split(/\r?\n/);
+  const frames = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (!lines[i].trim()) { i++; continue; }
+    const n = parseInt(lines[i].trim(), 10);
+    if (!Number.isFinite(n) || String(n) !== lines[i].trim()) throw new Error("Line " + (i + 1) + " should be the number of atoms.");
+    const comment = lines[i + 1] || "";
+    const atoms = [];
+    for (let k = 0; k < n; k++) {
+      const p = (lines[i + 2 + k] || "").trim().split(/\s+/);
+      if (p.length < 4) throw new Error("Frame " + (frames.length + 1) + " has fewer atom lines than it says (" + n + ").");
+      atoms.push({ el: normSymbol(p[0]), x: +p[1], y: +p[2], z: +p[3] });
+    }
+    let em = comment.match(new RegExp("(?:energy|\\bE)\\s*[:=]?\\s*(" + FLOAT + ")", "i")) || comment.match(new RegExp("(" + FLOAT + ")"));
+    frames.push({ atoms, energy: em ? parseFloat(em[1]) : null, status: "", comment });
+    i += 2 + n;
+  }
+  if (!frames.length) throw new Error("No structures found in this .xyz file.");
+  return { kind: frames.length > 1 ? "xyz" : "single", frames, scanCoord: null };
+}
+
+function parseAny(name, text) {
+  if (/Entering Gaussian System|Gaussian, Inc\.|Input orientation:|Standard orientation:/.test(text)) return parseGaussian(text);
+  if (/O\s+R\s+C\s+A|\* O   R   C   A \*/.test(text)) throw new Error("ORCA output is planned for the next version. For now: open the ORCA _trj.xyz file.");
+  if (/\.(mol|sdf|pdb)$/i.test(name)) throw new Error(".mol / .sdf / .pdb files are planned for the next version.");
+  const first = text.split(/\r?\n/).find(l => l.trim());
+  if (first && /^\s*\d+\s*$/.test(first)) return parseXyz(text);
+  throw new Error("Could not recognise this file. Supported now: Gaussian .log/.out and .xyz (single or multi-frame).");
+}
+
+// ---------- geometry ----------
+const sub = (a, b) => [a.x - b.x, a.y - b.y, a.z - b.z];
+const dot = (u, v) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+const cross = (u, v) => [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+const norm = u => Math.hypot(u[0], u[1], u[2]);
+function distance(a, b) { return norm(sub(a, b)); }
+function angle(a, b, c) { const u = sub(a, b), v = sub(c, b); return Math.acos(Math.max(-1, Math.min(1, dot(u, v) / (norm(u) * norm(v))))) * 180 / Math.PI; }
+function dihedral(a, b, c, d) {
+  const b1 = sub(b, a), b2 = sub(c, b), b3 = sub(d, c);
+  const n1 = cross(b1, b2), n2 = cross(b2, b3);
+  const b2hat = b2.map(x => x / norm(b2));
+  return Math.atan2(dot(cross(n1, n2), b2hat), dot(n1, n2)) * 180 / Math.PI;
+}
+function measureValue(atoms, idx) {
+  const p = idx.map(i => atoms[i]);
+  if (p.some(a => !a)) return null;
+  if (idx.length === 2) return { v: distance(p[0], p[1]), unit: "Å", name: "Bond" };
+  if (idx.length === 3) return { v: angle(p[0], p[1], p[2]), unit: "°", name: "Angle" };
+  if (idx.length === 4) return { v: dihedral(p[0], p[1], p[2], p[3]), unit: "°", name: "Dihedral" };
+  return null;
+}
+function bondsOf(atoms) {
+  const out = [];
+  for (let i = 0; i < atoms.length; i++) for (let j = i + 1; j < atoms.length; j++) {
+    const lim = (COV[atoms[i].el] || 1.4) + (COV[atoms[j].el] || 1.4) + 0.4;
+    const d = distance(atoms[i], atoms[j]);
+    if (d > 0.1 && d < lim) out.push([i, j]);
+  }
+  return out;
+}
+
+// ---------- state ----------
+const S = {
+  name: "", kind: "", frames: [], scanCoord: null,
+  removed: new Set(), undo: [], selected: new Set(), current: 0,
+  rot: [[1,0,0],[0,1,0],[0,0,1]], zoom: 1, extent: 5, measure: [], bondCache: new Map(),
+};
+const $ = id => document.getElementById(id);
+
+function loadText(name, text) {
+  let parsed;
+  try { parsed = parseAny(name, text); }
+  catch (e) { showBanner("Could not open " + name + ": " + e.message, true); return; }
+  Object.assign(S, parsed, { name, removed: new Set(), undo: [], selected: new Set(), current: 0, measure: [], bondCache: new Map() });
+  // scale so the largest frame fits
+  let ext = 1;
+  for (const f of S.frames) { const c = centroid(f.atoms); for (const a of f.atoms) ext = Math.max(ext, distance(a, c) + 0.6); }
+  S.extent = ext; resetView();
+  if (S.kind === "scan" && S.scanCoord) S.measure = S.scanCoord.atoms.slice();
+  const kindText = { scan: "relaxed scan, " + S.frames.length + " converged points", opt: "optimisation, " + S.frames.length + " steps", steps: S.frames.length + " structures", xyz: "multi-frame .xyz, " + S.frames.length + " frames", single: "single structure" }[S.kind];
+  $("fileinfo").textContent = name + " — " + kindText + ", " + S.frames[0].atoms.length + " atoms";
+  const noEnergy = S.frames.some(f => f.energy == null);
+  showBanner(noEnergy && S.frames.length > 1 ? "Some frames have no energy in their comment line, so the plot is empty. You can still step through the structures." : "", false);
+  renderAll();
+}
+function centroid(atoms) { const c = { x: 0, y: 0, z: 0 }; for (const a of atoms) { c.x += a.x; c.y += a.y; c.z += a.z; } const n = atoms.length || 1; return { x: c.x / n, y: c.y / n, z: c.z / n }; }
+function showBanner(msg, isError) { const b = $("banner"); b.textContent = msg; b.style.display = msg ? "block" : "none"; b.className = isError ? "error" : ""; }
+
+const visible = () => S.frames.map((f, i) => i).filter(i => !S.removed.has(i));
+function energyRef() { const e = visible().map(i => S.frames[i].energy).filter(e => e != null); return e.length ? Math.min(...e) : null; }
+const relKcal = (e, ref) => (e == null || ref == null) ? null : (e - ref) * HARTREE_TO_KCAL;
+function xLabel() { return { scan: "Scan point", opt: "Optimisation step", xyz: "Frame", steps: "Structure", single: "Structure" }[S.kind] || "Point"; }
+
+// ---------- editing ----------
+function removePoints(list) {
+  list = list.filter(i => !S.removed.has(i));
+  if (!list.length) return;
+  if (list.length >= visible().length) { showBanner("At least one point has to stay.", true); return; }
+  list.forEach(i => S.removed.add(i));
+  S.undo.push(list); S.selected.clear();
+  if (S.removed.has(S.current)) {
+    const vis = visible();
+    S.current = vis.reduce((best, i) => Math.abs(i - S.current) < Math.abs(best - S.current) ? i : best, vis[0]);
+  }
+  showBanner("", false); renderAll();
+}
+function undo() { const last = S.undo.pop(); if (!last) return; last.forEach(i => S.removed.delete(i)); renderAll(); }
+function restoreAll() { if (!S.removed.size) return; S.removed.clear(); S.undo = []; renderAll(); }
+function bringBack(i) { S.removed.delete(i); S.undo = S.undo.map(l => l.filter(x => x !== i)).filter(l => l.length); renderAll(); }
+function removeAction() { removePoints(S.selected.size ? [...S.selected] : [S.current]); }
+function step(dir) {
+  const vis = visible(); const k = vis.indexOf(S.current);
+  const n = vis[Math.max(0, Math.min(vis.length - 1, (k < 0 ? 0 : k) + dir))];
+  if (n != null) { S.current = n; renderAll(); }
+}
+
+function saveXyz() {
+  const out = [];
+  for (const i of visible()) {
+    const f = S.frames[i];
+    out.push(String(f.atoms.length));
+    const e = f.energy != null ? "Energy: " + f.energy.toFixed(10) + " Eh | " : "";
+    out.push(e + xLabel().toLowerCase() + " " + (i + 1) + " | from " + S.name);
+    for (const a of f.atoms) out.push(a.el.padEnd(2) + " " + [a.x, a.y, a.z].map(v => v.toFixed(8).padStart(14)).join(" "));
+  }
+  const blob = new Blob([out.join("\n") + "\n"], { type: "chemical/x-xyz" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = S.name.replace(/\.[^.]+$/, "") + "-cleaned.xyz";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+// ---------- plot ----------
+function niceTicks(min, max, count) {
+  const span = max - min || 1, raw = span / count, mag = Math.pow(10, Math.floor(Math.log10(raw))), r = raw / mag;
+  const stepv = (r >= 7.5 ? 10 : r >= 3.5 ? 5 : r >= 1.5 ? 2 : 1) * mag;
+  const t = []; for (let v = Math.ceil(min / stepv - 1e-9) * stepv; v <= max + stepv * 1e-6; v += stepv) t.push(+v.toFixed(10));
+  return t;
+}
+function renderPlot() {
+  const svg = $("plot"); const W = svg.clientWidth || 500, H = svg.clientHeight || 320;
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  const ns = "http://www.w3.org/2000/svg";
+  const el = (tag, attrs, text) => { const e = document.createElementNS(ns, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; svg.appendChild(e); return e; };
+  svg.innerHTML = "";
+  const ref = energyRef();
+  const vis = visible().filter(i => S.frames[i].energy != null);
+  if (S.frames.length < 2 || !vis.length) {
+    el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "#667085" }, S.frames.length < 2 ? "Only one structure — nothing to plot." : "No energies to plot.");
+    return;
+  }
+  const m = { l: 62, r: 16, t: 14, b: 42 };
+  const xs = [1, S.frames.length];
+  const ys = vis.map(i => relKcal(S.frames[i].energy, ref));
+  let ymax = Math.max(...ys); if (ymax <= 0) ymax = 1;
+  const ymin = 0, pad = (ymax - ymin) * 0.06;
+  const X = v => m.l + (v - xs[0]) / ((xs[1] - xs[0]) || 1) * (W - m.l - m.r);
+  const Y = v => H - m.b - (v - ymin + pad) / (ymax - ymin + 2 * pad) * (H - m.t - m.b);
+  for (const t of niceTicks(ymin, ymax, 5)) {
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: "#eef1f6" });
+    el("text", { x: m.l - 6, y: Y(t) + 4, "text-anchor": "end", "font-size": 11, fill: "#667085" }, String(+t.toFixed(3)));
+  }
+  let xt = niceTicks(xs[0], xs[1], Math.min(10, xs[1] - xs[0] || 1)).filter(t => Number.isInteger(t));
+  for (const t of xt) el("text", { x: X(t), y: H - m.b + 16, "text-anchor": "middle", "font-size": 11, fill: "#667085" }, String(t));
+  el("line", { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, stroke: "#9aa3b2" });
+  el("line", { x1: m.l, x2: m.l, y1: m.t, y2: H - m.b, stroke: "#9aa3b2" });
+  el("text", { x: (m.l + W - m.r) / 2, y: H - 6, "text-anchor": "middle", "font-size": 12, fill: "#1d2330" }, xLabel());
+  el("text", { x: 14, y: (m.t + H - m.b) / 2, "text-anchor": "middle", "font-size": 12, fill: "#1d2330", transform: "rotate(-90 14 " + (m.t + H - m.b) / 2 + ")" }, "ΔE (kcal/mol)");
+  el("polyline", { points: vis.map(i => X(i + 1) + "," + Y(relKcal(S.frames[i].energy, ref))).join(" "), fill: "none", stroke: "#2f6fdf", "stroke-width": 2 });
+  for (const i of vis) {
+    const f = S.frames[i], cx = X(i + 1), cy = Y(relKcal(f.energy, ref));
+    const isCur = i === S.current, isSel = S.selected.has(i), bad = f.status === "not converged";
+    if (isCur) el("circle", { cx, cy, r: 9, fill: "none", stroke: "#f5c400", "stroke-width": 3 });
+    const c = el("circle", { class: "pt", cx, cy, r: isCur ? 6 : 4.5, fill: isSel ? "#d43c3c" : bad ? "#fff" : "#2f6fdf", stroke: bad ? "#e08a00" : "#fff", "stroke-width": bad ? 2.5 : 1.5, "data-i": i });
+    const t = document.createElementNS(ns, "title");
+    t.textContent = xLabel() + " " + (i + 1) + ": ΔE = " + relKcal(f.energy, ref).toFixed(2) + " kcal/mol" + (bad ? " (not converged)" : "");
+    c.appendChild(t);
+  }
+}
+$("plot").addEventListener("click", ev => {
+  const t = ev.target.closest(".pt"); if (!t) return;
+  const i = +t.getAttribute("data-i");
+  if (ev.ctrlKey || ev.metaKey || ev.shiftKey) { S.selected.has(i) ? S.selected.delete(i) : S.selected.add(i); }
+  else { S.selected.clear(); }
+  S.current = i; renderAll();
+});
+
+// ---------- table ----------
+function renderTable() {
+  const ref = energyRef();
+  const hasCoord = S.kind === "scan" && S.scanCoord;
+  const coordName = hasCoord ? { B: "Bond", A: "Angle", D: "Dihedral", L: "Linear" }[S.scanCoord.type] + " " + S.scanCoord.atoms.map(a => a + 1).join("-") : "";
+  let h = "<tr><th>" + xLabel() + "</th>" + (hasCoord ? "<th>" + coordName + "</th>" : "") + "<th>E (Eh)</th><th>ΔE (kcal/mol)</th><th>Status</th><th></th></tr>";
+  S.frames.forEach((f, i) => {
+    const rem = S.removed.has(i);
+    const cls = rem ? "removed" : S.selected.has(i) ? "selected" : i === S.current ? "current" : "";
+    let cv = "";
+    if (hasCoord) { const mv = measureValue(f.atoms, S.scanCoord.atoms); cv = "<td>" + (mv ? mv.v.toFixed(S.scanCoord.type === "B" ? 3 : 1) + " " + mv.unit : "") + "</td>"; }
+    const rel = rem ? null : relKcal(f.energy, ref);
+    h += '<tr class="' + cls + '" data-i="' + i + '"><td>' + (i + 1) + "</td>" + cv +
+      "<td>" + (f.energy != null ? f.energy.toFixed(8) : "—") + "</td><td>" + (rel != null ? rel.toFixed(2) : "—") + "</td><td>" + (f.status || "") + "</td>" +
+      "<td>" + (rem ? '<button data-back="' + i + '">Bring back</button>' : '<button data-rm="' + i + '" class="danger">Remove</button>') + "</td></tr>";
+  });
+  $("table").innerHTML = h;
+  const cur = $("table").querySelector("tr.current, tr.selected");
+  if (cur && document.activeElement === document.body) cur.scrollIntoView({ block: "nearest" });
+}
+$("table").addEventListener("click", ev => {
+  const b = ev.target.closest("button");
+  if (b && b.dataset.rm) { removePoints([+b.dataset.rm]); return; }
+  if (b && b.dataset.back) { bringBack(+b.dataset.back); return; }
+  const tr = ev.target.closest("tr[data-i]"); if (!tr) return;
+  const i = +tr.dataset.i; if (S.removed.has(i)) return;
+  if (ev.ctrlKey || ev.metaKey || ev.shiftKey) { S.selected.has(i) ? S.selected.delete(i) : S.selected.add(i); } else S.selected.clear();
+  S.current = i; renderAll();
+});
+
+// ---------- 3D viewer ----------
+const cv = $("viewer"), ctx = cv.getContext("2d");
+function resetView() {
+  // a pleasant default tilt
+  const a = -0.5, b = 0.6;
+  const rx = [[1,0,0],[0,Math.cos(a),-Math.sin(a)],[0,Math.sin(a),Math.cos(a)]];
+  const ry = [[Math.cos(b),0,Math.sin(b)],[0,1,0],[-Math.sin(b),0,Math.cos(b)]];
+  S.rot = matMul(rx, ry); S.zoom = 1;
+}
+function matMul(A, B) { return A.map((r, i) => [0, 1, 2].map(j => r[0] * B[0][j] + r[1] * B[1][j] + r[2] * B[2][j])); }
+function rotate(ax, ay) {
+  const rx = [[1,0,0],[0,Math.cos(ax),-Math.sin(ax)],[0,Math.sin(ax),Math.cos(ax)]];
+  const ry = [[Math.cos(ay),0,Math.sin(ay)],[0,1,0],[-Math.sin(ay),0,Math.cos(ay)]];
+  S.rot = matMul(matMul(ry, rx), S.rot);
+}
+function shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16); let r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  if (f > 0) { r += (255 - r) * f; g += (255 - g) * f; b += (255 - b) * f; } else { r *= 1 + f; g *= 1 + f; b *= 1 + f; }
+  return "rgb(" + (r | 0) + "," + (g | 0) + "," + (b | 0) + ")";
+}
+let projected = [];
+function draw3D() {
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+  const f = S.frames[S.current]; if (!f) { projected = []; return; }
+  const atoms = f.atoms, c = centroid(atoms), R = S.rot;
+  const s = Math.min(W, H) / (2 * S.extent) * S.zoom;
+  projected = atoms.map((a, i) => {
+    const v = [a.x - c.x, a.y - c.y, a.z - c.z];
+    const p = R.map(r => r[0] * v[0] + r[1] * v[1] + r[2] * v[2]);
+    const rad = (0.2 + 0.25 * (COV[a.el] || 1.4)) * s;
+    return { i, sx: W / 2 + p[0] * s, sy: H / 2 - p[1] * s, z: p[2], r: rad, el: a.el };
+  });
+  let bonds = S.bondCache.get(S.current);
+  if (!bonds) { bonds = bondsOf(atoms); S.bondCache.set(S.current, bonds); }
+  const items = [];
+  for (const [i, j] of bonds) {
+    const A = projected[i], B = projected[j];
+    const mx = (A.sx + B.sx) / 2, my = (A.sy + B.sy) / 2;
+    items.push({ z: (A.z * 3 + B.z) / 4 - 0.01, bond: [A.sx, A.sy, mx, my], color: COLORS[A.el] || "#ff1493" });
+    items.push({ z: (B.z * 3 + A.z) / 4 - 0.01, bond: [B.sx, B.sy, mx, my], color: COLORS[B.el] || "#ff1493" });
+  }
+  for (const p of projected) items.push({ z: p.z, atom: p });
+  items.sort((a, b) => a.z - b.z);
+  const bw = Math.max(2, 0.16 * s);
+  ctx.lineCap = "round";
+  for (const it of items) {
+    if (it.bond) {
+      const [x1, y1, x2, y2] = it.bond;
+      ctx.strokeStyle = "#555c68"; ctx.lineWidth = bw + 2; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.strokeStyle = shade(it.color, -0.05); ctx.lineWidth = bw; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    } else {
+      const p = it.atom, col = COLORS[p.el] || "#ff1493";
+      const g = ctx.createRadialGradient(p.sx - p.r * 0.35, p.sy - p.r * 0.35, p.r * 0.1, p.sx, p.sy, p.r);
+      g.addColorStop(0, shade(col, 0.7)); g.addColorStop(0.6, col); g.addColorStop(1, shade(col, -0.35));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.sx, p.sy, p.r, 0, 2 * Math.PI); ctx.fill();
+      ctx.strokeStyle = "rgba(40,45,55,.55)"; ctx.lineWidth = 1; ctx.stroke();
+      const mi = S.measure.indexOf(p.i);
+      if (mi >= 0) { ctx.strokeStyle = "#f5c400"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(p.sx, p.sy, p.r + 3, 0, 2 * Math.PI); ctx.stroke(); }
+      if ($("chklabels").checked) {
+        ctx.font = "600 " + Math.max(10, Math.min(15, p.r * 0.9)) + "px system-ui, sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.lineWidth = 3; ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.strokeText(String(p.i + 1), p.sx, p.sy);
+        ctx.fillStyle = "#111"; ctx.fillText(String(p.i + 1), p.sx, p.sy);
+      }
+    }
+  }
+}
+function renderMeasure() {
+  const f = S.frames[S.current];
+  let txt = "";
+  if (f && S.measure.length >= 2) {
+    const mv = measureValue(f.atoms, S.measure);
+    if (mv) txt = mv.name + " " + S.measure.map(i => f.atoms[i].el + (i + 1)).join("–") + ": " + mv.v.toFixed(mv.unit === "Å" ? 3 : 1) + " " + mv.unit;
+  } else if (f && S.measure.length === 1) txt = "Picked " + f.atoms[S.measure[0]].el + (S.measure[0] + 1) + " — click one more atom.";
+  $("measure").textContent = txt;
+}
+let drag = null;
+cv.addEventListener("pointerdown", e => { drag = { x: e.clientX, y: e.clientY, moved: 0 }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.moved += Math.abs(dx) + Math.abs(dy); drag.x = e.clientX; drag.y = e.clientY;
+  rotate(dy * 0.01, dx * 0.01); draw3D();
+});
+cv.addEventListener("pointerup", e => {
+  if (drag && drag.moved < 5) pickAtom(e);
+  drag = null;
+});
+cv.addEventListener("wheel", e => { e.preventDefault(); S.zoom = Math.max(0.2, Math.min(8, S.zoom * Math.exp(-e.deltaY * 0.0015))); draw3D(); }, { passive: false });
+function pickAtom(e) {
+  const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  let hit = null;
+  for (const p of projected) if (Math.hypot(p.sx - x, p.sy - y) <= p.r + 2 && (!hit || p.z > hit.z)) hit = p;
+  if (!hit) S.measure = [];
+  else if (S.measure.includes(hit.i)) S.measure = S.measure.filter(i => i !== hit.i);
+  else S.measure = S.measure.length >= 4 ? [hit.i] : S.measure.concat(hit.i);
+  draw3D(); renderMeasure();
+}
+
+// ---------- render & controls ----------
+function renderAll() {
+  renderPlot(); renderTable(); draw3D(); renderMeasure();
+  const f = S.frames[S.current];
+  $("structtitle").textContent = f ? "Structure — " + xLabel().toLowerCase() + " " + (S.current + 1) + (f.status ? " (" + f.status + ")" : "") : "Structure";
+  $("btnremove").textContent = S.selected.size ? "Remove " + S.selected.size + " marked points" : "Remove point " + (S.current + 1);
+  $("btnremove").disabled = S.frames.length < 2;
+  $("btnundo").disabled = !S.undo.length;
+  $("btnrestore").disabled = !S.removed.size;
+  $("btnsave").disabled = !S.frames.length;
+}
+$("btnremove").onclick = removeAction;
+$("btnundo").onclick = undo;
+$("btnrestore").onclick = restoreAll;
+$("btnsave").onclick = saveXyz;
+$("btnresetview").onclick = () => { resetView(); draw3D(); };
+$("btnclearmeasure").onclick = () => { S.measure = []; draw3D(); renderMeasure(); };
+$("chklabels").onchange = draw3D;
+$("loadsample").onclick = () => loadText(SAMPLE_NAME, SAMPLE_LOG);
+document.addEventListener("keydown", e => {
+  if (e.target.matches("input, textarea")) return;
+  if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); step(1); }
+  else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); step(-1); }
+  else if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); removeAction(); }
+  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); }
+});
+function readFile(file) { const r = new FileReader(); r.onload = () => loadText(file.name, String(r.result)); r.readAsText(file); }
+$("fileinput").onchange = e => { if (e.target.files[0]) readFile(e.target.files[0]); e.target.value = ""; };
+document.addEventListener("dragover", e => { e.preventDefault(); document.body.classList.add("drop"); });
+document.addEventListener("dragleave", e => { if (!e.relatedTarget) document.body.classList.remove("drop"); });
+document.addEventListener("drop", e => { e.preventDefault(); document.body.classList.remove("drop"); if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]); });
+new ResizeObserver(() => { renderPlot(); draw3D(); }).observe(document.querySelector("main"));
+
+loadText(SAMPLE_NAME, SAMPLE_LOG);
+</script>
+</body>
+</html>
