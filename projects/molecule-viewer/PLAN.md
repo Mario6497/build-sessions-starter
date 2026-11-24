@@ -20,6 +20,10 @@
 - **Save:** cleaned multi-frame .xyz with the remaining points and their energies in the comment lines. It opens in Molden and back in this tool.
 - Short hints on the page so colleagues and students understand it.
 
+## Added in step 7
+
+- **`scan2molden.sh`** (bash + awk, for the cluster): turns a Gaussian scan .log into a `.molden` file with only the converged point of every scan step and their energies (`[GEOCONV]`), so Molden shows the energy curve. `-x 8,12` leaves out outlier points, `--xyz` writes a plain multi-frame .xyz instead. Unix line endings.
+
 ## Next (step 7, one at a time)
 
 - ORCA output (.out) and ORCA `_trj.xyz`.
