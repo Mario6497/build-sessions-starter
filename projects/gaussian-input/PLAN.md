@@ -8,9 +8,9 @@
 - Button to open an `.xyz` file. On first open it already shows a made-up sample molecule.
 - Atoms shown as a numbered list (number, element, x, y, z), so atom numbers are easy to read.
 - Five calculation types:
-  - **Optimisation:** `Opt=Tight Freq` (regular, no constraints).
+  - **Optimisation:** `Opt=Tight Freq` (regular, no constraints), then by default `--Link1--` with a single point (`wB97XD/6-311++G(d,p)`, same solvent, `Geom=AllCheck Guess=Read`, same .chk). Can be switched off.
   - **Constrained optimisation:** `Opt=ModRedundant Freq` with frozen bonds (B), angles (A) and dihedrals (D), marked with `F`.
-  - **TS search:** `Opt=(TS,CalcFC,NoEigenTest) Freq`, optionally with constraints too (adds `ModRedundant`).
+  - **TS search:** `Opt=(TS,CalcFC,NoEigenTest) Freq`, optionally with constraints too (adds `ModRedundant`), then by default the same `--Link1--` single point as for optimisation. Can be switched off.
   - **Relaxed scan:** `Opt=ModRedundant` with one or more `S` lines (number of steps, step size), plus optional frozen (`F`) coordinates. No `Freq` by default.
   - **Single point:** energy only, no `Opt`/`Freq`.
 - Convergence choice for every optimisation type: Loose · Normal · Tight. Default: Tight for regular optimisation, Normal for constrained opt, TS search and scan.

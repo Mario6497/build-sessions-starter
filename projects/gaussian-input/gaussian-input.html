@@ -98,6 +98,10 @@
         <label class="inline"><input type="checkbox" id="freq"> Add Freq</label>
         <p class="hint">Frequencies after the optimisation.</p>
       </div>
+      <div id="linkBox">
+        <label class="inline"><input type="checkbox" id="linkSP"> Then single point (--Link1--)</label>
+        <p class="hint">Runs the single-point method/basis on the optimised geometry from the .chk file.</p>
+      </div>
     </div>
   </div>
 
@@ -191,15 +195,16 @@ const FACTORY = {
   walltime: "168:00:00",
   module: "module load scientific/gaussian/16-C01",
   runner: "dog16",
+  linkSP: { opt: true, ts: true },
   conv: { opt: "Tight", copt: "Normal", ts: "Normal", scan: "Normal" },
   freq: { opt: true, copt: true, ts: true, scan: false }
 };
 const STORE_KEY = "gaussianInputBuilder.defaults.v1";
 
 const TYPES = [
-  { id: "opt",  label: "Optimisation",            hint: "Regular geometry optimisation, no constraints." },
+  { id: "opt",  label: "Optimisation",            hint: "Regular geometry optimisation, no constraints. By default followed by a single point (--Link1--)." },
   { id: "copt", label: "Constrained optimisation", hint: "Optimisation with frozen coordinates (F). Add at least one constraint below." },
-  { id: "ts",   label: "TS search",                hint: "Opt=(TS,CalcFC,NoEigenTest). Constraints are optional; if you add any, ModRedundant is added." },
+  { id: "ts",   label: "TS search",                hint: "Opt=(TS,CalcFC,NoEigenTest). Constraints are optional; if you add any, ModRedundant is added. By default followed by a single point (--Link1--)." },
   { id: "scan", label: "Relaxed scan",             hint: "Scan one or more coordinates (S) while everything else relaxes. Frozen (F) coordinates are allowed too." },
   { id: "sp",   label: "Single point",             hint: "Energy only at the given geometry. Uses the single-point method/basis." }
 ];
@@ -235,6 +240,8 @@ function loadDefaults() {
       Object.assign(s, saved);
       s.conv = Object.assign({}, FACTORY.conv, saved.conv || {});
       s.freq = Object.assign({}, FACTORY.freq, saved.freq || {});
+      const ls = typeof saved.linkSP === "boolean" ? { opt: saved.linkSP } : (saved.linkSP || {});
+      s.linkSP = Object.assign({}, FACTORY.linkSP, ls);
     }
   } catch (e) { /* storage not available: use factory defaults */ }
   return s;
@@ -346,6 +353,9 @@ function syncCalcFields() {
   const isOpt = calc !== "sp";
   $("optRow").style.display = isOpt ? "" : "none";
   if (isOpt) { $("conv").value = settings.conv[calc]; $("freq").checked = settings.freq[calc]; }
+  const hasLink = calc in settings.linkSP;
+  $("linkBox").style.display = hasLink ? "" : "none";
+  if (hasLink) $("linkSP").checked = settings.linkSP[calc];
   const showCon = calc === "copt" || calc === "ts" || calc === "scan";
   $("conCard").style.display = showCon ? "" : "none";
   $("conHint").textContent = {
@@ -475,6 +485,20 @@ function build() {
     });
     L.push("");
   }
+  if ((calc in settings.linkSP) && $("linkSP").checked) {
+    const spMethod = $("mSP").value.trim();
+    if (!spMethod) errors.push("Single-point method/basis is empty (needed for the --Link1-- step).");
+    const r = ["#p", spMethod];
+    const solv = $("solvent").value.trim(); if (solv) r.push(solv);
+    const extra = $("extra").value.trim(); if (extra) r.push(extra);
+    r.push("Geom=AllCheck", "Guess=Read");
+    L.push("--Link1--");
+    L.push(`%nprocshared=${$("nproc").value.trim()}`);
+    L.push(`%mem=${$("mem").value.trim()}`);
+    L.push(`%chk=${name || "job"}.chk`);
+    L.push(r.filter(Boolean).join(" "));
+    L.push("");
+  }
   return { text: L.join("\n") + "\n", errors, warns, name: name || "job" };
 }
 
@@ -544,13 +568,15 @@ function fillSettings() {
 $("title").addEventListener("input", () => { titleTouched = $("title").value.trim() !== ""; render(); });
 $("conv").addEventListener("change", () => { settings.conv[calc] = $("conv").value; render(); });
 $("freq").addEventListener("change", () => { settings.freq[calc] = $("freq").checked; render(); });
+$("linkSP").addEventListener("change", () => { settings.linkSP[calc] = $("linkSP").checked; render(); });
 
 $("saveDef").addEventListener("click", () => {
   const s = {
     mOpt: $("mOpt").value.trim(), mSP: $("mSP").value.trim(), solvent: $("solvent").value.trim(),
     extra: $("extra").value.trim(), charge: Number($("charge").value), mult: Number($("mult").value),
     nproc: Number($("nproc").value), mem: $("mem").value.trim(), conv: settings.conv, freq: settings.freq,
-    walltime: $("walltime").value.trim(), module: $("module").value.trim(), runner: $("runner").value.trim()
+    walltime: $("walltime").value.trim(), module: $("module").value.trim(), runner: $("runner").value.trim(),
+    linkSP: settings.linkSP
   };
   try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); $("defMsg").innerHTML = `<div class="msg ok">Saved. These settings load automatically next time (in this browser).</div>`; }
   catch (e) { $("defMsg").innerHTML = `<div class="msg warn">This browser does not allow saving here. Settings are used for this session only.</div>`; }
