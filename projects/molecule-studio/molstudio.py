@@ -13,7 +13,7 @@ Start (Ubuntu):
     python3 molstudio.py              opens the made-up sample scan
     python3 molstudio.py scan.log     opens your file
 
-Keys: Ctrl+O open · Ctrl+S save .xyz · Left/Right step through points (or modes)
+Keys: Ctrl+O open · Ctrl+Shift+S save this structure · Ctrl+S save all points ·Left/Right step through points (or modes)
       Delete remove marked points · Ctrl+Z undo
       1 ball and stick · 2 sticks · 3 spacefill · 4 wireframe · N atom numbers on/off
 Needs only the Python standard library with tkinter (sudo apt install python3-tk).
@@ -580,7 +580,9 @@ class App:
             sm.add_command(label=os.path.basename(p), command=lambda p=p: self.load_path(p))
         fm.add_cascade(label="Open sample", menu=sm)
         fm.add_separator()
-        fm.add_command(label="Save remaining points as .xyz…", accelerator="Ctrl+S", command=self.save_xyz)
+        fm.add_command(label="Save this structure as .xyz…", accelerator="Ctrl+Shift+S",
+                       command=self.save_current)
+        fm.add_command(label="Save all remaining points as .xyz…", accelerator="Ctrl+S", command=self.save_xyz)
         fm.add_separator()
         fm.add_command(label="Quit", accelerator="Ctrl+Q", command=self.root.destroy)
         bar.add_cascade(label="File", menu=fm)
@@ -610,7 +612,9 @@ class App:
         self.b_undo.pack(side="left", padx=4)
         self.b_restore = ttk.Button(top, text="Bring all back", command=self.restore_all)
         self.b_restore.pack(side="left")
-        ttk.Button(top, text="Save .xyz (Ctrl+S)", command=self.save_xyz).pack(side="left", padx=(12, 4))
+        ttk.Button(top, text="Save this structure (Ctrl+Shift+S)",
+                   command=self.save_current).pack(side="left", padx=(12, 4))
+        ttk.Button(top, text="Save all points (Ctrl+S)", command=self.save_xyz).pack(side="left")
         self.info = ttk.Label(top, text="", foreground="#555")
         self.info.pack(side="left", padx=12)
 
@@ -692,6 +696,7 @@ class App:
                 ("<Delete>", self.remove_action), ("<BackSpace>", self.remove_action),
                 ("<Control-z>", self.undo), ("<Control-o>", self.open_dialog),
                 ("<Control-s>", self.save_xyz), ("<Control-q>", self.root.destroy),
+                ("<Control-S>", self.save_current), ("<Control-Shift-s>", self.save_current),
                 ("n", self.toggle_labels), ("N", self.toggle_labels))
         for seq, fn in keys:
             self.root.bind(seq, lambda e, fn=fn: None if self.typing() else fn())
@@ -1095,6 +1100,33 @@ class App:
             with open(path, "w", newline="\n") as fh:
                 fh.write("\n".join(self.xyz_lines()) + "\n")
             self.info.config(text="Saved %d points to %s" % (len(self.visible()), os.path.basename(path)))
+
+    def save_current(self, path=None):
+        """Save only the structure shown on the right (resting structure in the Vibrations tab)."""
+        if not self.frames:
+            return None
+        base = os.path.splitext(self.name)[0]
+        if self.vib_active():
+            atoms, tag = self.vib.atoms, "freq-geom"
+            comment = "%s | structure of the frequency calculation" % self.name
+        else:
+            f = self.frames[self.current]
+            atoms, tag = f.atoms, "%s%d" % ("point" if self.kind == "scan" else "step", self.current + 1)
+            comment = self.comment(self.current)
+            if len(self.frames) == 1:
+                tag = "geom"
+        if path is None:
+            path = filedialog.asksaveasfilename(
+                title="Save this structure", initialdir=os.path.dirname(self.path) or ".",
+                initialfile="%s_%s.xyz" % (base, tag), defaultextension=".xyz", filetypes=[(".xyz", "*.xyz")])
+        if not path:
+            return None
+        with open(path, "w", newline="\n") as fh:
+            fh.write("%d\n%s\n" % (len(atoms), comment))
+            for el, x, y, z in atoms:
+                fh.write("%-2s %14.8f %14.8f %14.8f\n" % (el, x, y, z))
+        self.info.config(text="Saved one structure to %s" % os.path.basename(path))
+        return path
 
     # ---------- table
     def update_scan_heading(self):
