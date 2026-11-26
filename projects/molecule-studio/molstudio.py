@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""molstudio.py - Molecule studio, a local Molden-like viewer (build step 1).
+"""molstudio.py - Molecule studio, a local Molden-like viewer (build step 2).
 
 Opens Gaussian .log/.out, ORCA .out, ORCA _trj.xyz and .xyz files (single or
 multi-frame). Relaxed scans show only the converged point of every scan step;
 optimisations and TS searches show every step. Energy plot on the left,
 rotatable 3D structure on the right.
+Vibrations tab (Gaussian / ORCA frequency jobs): frequency list, animated
+normal modes with arrows, IR spectrum, and forward/backward structures
+displaced along a mode (e.g. the imaginary mode of a TS) saved as .xyz.
 
 Start (Ubuntu):
     python3 molstudio.py              opens the made-up sample scan
     python3 molstudio.py scan.log     opens your file
 
-Keys: Ctrl+O open · Ctrl+S save .xyz · Left/Right step through points
+Keys: Ctrl+O open · Ctrl+S save .xyz · Left/Right step through points (or modes)
       Delete remove marked points · Ctrl+Z undo
       1 ball and stick · 2 sticks · 3 spacefill · 4 wireframe · N atom numbers on/off
 Needs only the Python standard library with tkinter (sudo apt install python3-tk).
@@ -95,6 +98,165 @@ class Result:
         self.frames = frames
         self.scan_coord = scan_coord  # (type letter, [0-based atom indices]) or None
         self.program = program      # gaussian, orca, xyz
+        self.vib = None             # Vibrations or None
+
+
+class Mode:
+    def __init__(self, label, freq, ir, vec):
+        self.label = label          # mode number as the program prints it
+        self.freq = freq            # cm-1, negative = imaginary
+        self.ir = ir                # km/mol
+        self.vec = vec              # list of (dx, dy, dz) per atom
+
+
+class Vibrations:
+    def __init__(self, atoms, modes):
+        self.atoms = atoms          # geometry the modes belong to
+        self.modes = modes
+
+
+def read_orient(lines, i):
+    """Gaussian orientation table starting at line i -> list of atoms."""
+    atoms = []
+    j = i + 5
+    while j < len(lines) and not re.match(r"^\s*-{5,}", lines[j]):
+        p = lines[j].split()
+        if len(p) >= 5:
+            atoms.append((symbol_of(int(p[1])), float(p[-3]), float(p[-2]), float(p[-1])))
+        j += 1
+    return atoms
+
+
+def parse_gaussian_freq(text):
+    """Last frequency section of a Gaussian output, or None."""
+    lines = text.splitlines()
+    start = None
+    for k, l in enumerate(lines):
+        if "Harmonic frequencies" in l:
+            start = k
+    if start is None:
+        return None
+    geom = None
+    for orient in ("Standard orientation:", "Input orientation:", "Z-Matrix orientation:"):
+        idx = [k for k in range(start) if orient in lines[k]]
+        if idx:
+            geom = read_orient(lines, idx[-1])
+            break
+    if not geom:
+        return None
+    n = len(geom)
+    modes = []
+    i = start
+    while i < len(lines):
+        l = lines[i]
+        if "- Thermochemistry -" in l or "Normal termination" in l:
+            break
+        if re.match(r"^\s*Frequencies --\s", l):
+            freqs = [float(x) for x in l.split("--", 1)[1].split()]
+            nums = lines[i - 2].split()
+            labels = nums if len(nums) == len(freqs) and all(x.isdigit() for x in nums) \
+                else [str(len(modes) + k + 1) for k in range(len(freqs))]
+            ir = [0.0] * len(freqs)
+            j = i + 1
+            while j < len(lines) and not re.match(r"^\s*Atom\s+AN\s+X", lines[j]):
+                if lines[j].strip().startswith("IR Inten"):
+                    ir = [float(x) for x in lines[j].split("--", 1)[1].split()]
+                j += 1
+            vecs = [[] for _ in freqs]
+            for a in range(n):
+                p = lines[j + 1 + a].split()[2:]
+                for m in range(len(freqs)):
+                    vecs[m].append(tuple(float(x) for x in p[3 * m:3 * m + 3]))
+            for m in range(len(freqs)):
+                modes.append(Mode(labels[m], freqs[m], ir[m] if m < len(ir) else 0.0, vecs[m]))
+            i = j + 1 + n
+            continue
+        i += 1
+    return Vibrations(geom, modes) if modes else None
+
+
+def parse_orca_freq(text):
+    """Last frequency section of an ORCA output, or None."""
+    lines = text.splitlines()
+    vf = None
+    for k, l in enumerate(lines):
+        if "VIBRATIONAL FREQUENCIES" in l:
+            vf = k
+    if vf is None:
+        return None
+    geom = None
+    for k in range(vf, -1, -1):
+        if "CARTESIAN COORDINATES (ANGSTROEM)" in lines[k]:
+            geom = []
+            for l in lines[k + 2:]:
+                p = l.split()
+                if len(p) < 4:
+                    break
+                geom.append((norm_symbol(p[0]), float(p[1]), float(p[2]), float(p[3])))
+            break
+    if not geom:
+        return None
+    n = len(geom)
+    freqs, nm, irs = {}, None, {}
+    for k in range(vf + 1, len(lines)):
+        m = re.match(r"^\s*(\d+):\s+(-?\d+\.\d+)\s+cm\*\*-1", lines[k])
+        if m:
+            freqs[int(m.group(1))] = float(m.group(2))
+        elif "NORMAL MODES" in lines[k]:
+            nm = k
+            break
+    if nm is None:
+        return None
+    cols, cur = {}, None
+    k = nm + 1
+    while k < len(lines):
+        l = lines[k]
+        if "IR SPECTRUM" in l or "THERMOCHEMISTRY" in l:
+            break
+        t = l.split()
+        if t and all(x.isdigit() for x in t):
+            cur = [int(x) for x in t]
+        elif cur and t and t[0].isdigit() and len(t) == len(cur) + 1:
+            row = int(t[0])
+            for c, v in zip(cur, t[1:]):
+                cols.setdefault(c, {})[row] = float(v)
+        k += 1
+    if k < len(lines) and "IR SPECTRUM" in lines[k]:
+        for l in lines[k + 1:]:
+            m = re.match(r"^\s*(\d+):\s+(-?\d+\.\d+)\s+\S+\s+(-?\d+\.\d+)", l)
+            if m:
+                irs[int(m.group(1))] = float(m.group(3))
+            elif irs and not l.strip():
+                break
+    modes = []
+    for c in sorted(freqs):
+        if abs(freqs[c]) < 1e-3 or c not in cols or len(cols[c]) < 3 * n:
+            continue
+        v = cols[c]
+        modes.append(Mode(str(c), freqs[c], irs.get(c, 0.0),
+                          [(v[3 * a], v[3 * a + 1], v[3 * a + 2]) for a in range(n)]))
+    return Vibrations(geom, modes) if modes else None
+
+
+def max_move(vec):
+    return max((length((0,) + tuple(v)) for v in vec), default=0.0)
+
+
+def displaced(atoms, vec, step):
+    """Move along a mode so that the atom that moves most moves `step` Å (negative = backward)."""
+    m = max_move(vec) or 1.0
+    return [(el, x + step * v[0] / m, y + step * v[1] / m, z + step * v[2] / m)
+            for (el, x, y, z), v in zip(atoms, vec)]
+
+
+def ir_curve(modes, lo, hi, fwhm, npts):
+    """Sum of Lorentz peaks; every peak is as high as its IR intensity."""
+    g = (fwhm / 2.0) ** 2
+    out = []
+    for k in range(npts + 1):
+        nu = lo + (hi - lo) * k / float(npts)
+        out.append((nu, sum(m.ir * g / ((nu - m.freq) ** 2 + g) for m in modes)))
+    return out
 
 
 def pick_frames(steps, is_opt, is_scan, what):
@@ -178,7 +340,9 @@ def parse_gaussian(text):
     if not steps:
         raise ValueError("Found geometries but no 'SCF Done' energies in this Gaussian file.")
     kind, frames = pick_frames(steps, is_opt, is_scan, "Gaussian")
-    return Result(kind, frames, scan_coord if kind == "scan" else None, "gaussian")
+    res = Result(kind, frames, scan_coord if kind == "scan" else None, "gaussian")
+    res.vib = parse_gaussian_freq(text)      # whole file: freq often runs in a --Link1-- part
+    return res
 
 
 # ---------------------------------------------------------------- ORCA
@@ -238,7 +402,9 @@ def parse_orca(text):
     if not steps:
         raise ValueError("Found no 'FINAL SINGLE POINT ENERGY' with a geometry in this ORCA file.")
     kind, frames = pick_frames(steps, is_opt, is_scan, "ORCA")
-    return Result(kind, frames, scan_coord if kind == "scan" else None, "orca")
+    res = Result(kind, frames, scan_coord if kind == "scan" else None, "orca")
+    res.vib = parse_orca_freq(text)
+    return res
 
 
 # ---------------------------------------------------------------- xyz
@@ -395,6 +561,12 @@ class App:
         self.show_labels = tk.BooleanVar(value=True)
         self.zero_based = tk.BooleanVar(value=False)
         self.model = tk.StringVar(value="ball")
+        self.vib, self.vib_sel, self.vib_busy, self.spec_pts = None, None, False, []
+        self.anim_on, self.anim_job, self.phase = False, None, 0.0
+        self.amp = tk.DoubleVar(value=0.4)
+        self.show_arrows = tk.BooleanVar(value=True)
+        self.fwhm = tk.StringVar(value="20")
+        self.disp_step = tk.StringVar(value="0.10")
         self.build_menu()
         self.build_ui()
 
@@ -448,16 +620,25 @@ class App:
         paned.add(left, weight=1)
         paned.add(right, weight=1)
 
-        ttk.Label(left, text="Click a point to see its structure · Ctrl+click marks several · "
-                             "←/→ step · Delete removes · double-click a removed row to bring it back",
+        self.nb = ttk.Notebook(left)
+        self.nb.pack(fill="both", expand=True)
+        ef, vf = ttk.Frame(self.nb, padding=4), ttk.Frame(self.nb, padding=4)
+        self.energy_tab, self.vib_tab = ef, vf
+        self.nb.add(ef, text="Energy")
+        self.nb.add(vf, text="Vibrations")
+        self.nb.bind("<<NotebookTabChanged>>", self.on_tab)
+        self.build_vib_tab(vf)
+
+        ttk.Label(ef, text="Click a point to see its structure · Ctrl+click marks several · "
+                           "←/→ step · Delete removes · double-click a removed row to bring it back",
                   foreground="#666", wraplength=560).pack(anchor="w")
-        self.plot = tk.Canvas(left, height=320, bg="white", highlightthickness=0)
+        self.plot = tk.Canvas(ef, height=320, bg="white", highlightthickness=0)
         self.plot.pack(fill="x", pady=4)
         self.plot.bind("<Button-1>", lambda e: self.plot_click(e, False))
         self.plot.bind("<Control-Button-1>", lambda e: self.plot_click(e, True))
         self.plot.bind("<Configure>", lambda e: self.draw_plot())
 
-        tf = ttk.Frame(left)
+        tf = ttk.Frame(ef)
         tf.pack(fill="both", expand=True)
         cols = ("pt", "coord", "e", "de", "status")
         self.tree = ttk.Treeview(tf, columns=cols, show="headings", selectmode="extended")
@@ -506,19 +687,72 @@ class App:
                               "Keys 1–4 change the model, N turns atom numbers on/off.",
                   foreground="#666", wraplength=560).pack(anchor="w")
 
-        keys = (("<Left>", lambda e: self.step(-1)), ("<Up>", lambda e: self.step(-1)),
-                ("<Right>", lambda e: self.step(1)), ("<Down>", lambda e: self.step(1)),
-                ("<Delete>", lambda e: self.remove_action()), ("<BackSpace>", lambda e: self.remove_action()),
-                ("<Control-z>", lambda e: self.undo()), ("<Control-o>", lambda e: self.open_dialog()),
-                ("<Control-s>", lambda e: self.save_xyz()), ("<Control-q>", lambda e: self.root.destroy()),
-                ("n", lambda e: self.toggle_labels()), ("N", lambda e: self.toggle_labels()))
+        keys = (("<Left>", lambda: self.step(-1)), ("<Up>", lambda: self.step(-1)),
+                ("<Right>", lambda: self.step(1)), ("<Down>", lambda: self.step(1)),
+                ("<Delete>", self.remove_action), ("<BackSpace>", self.remove_action),
+                ("<Control-z>", self.undo), ("<Control-o>", self.open_dialog),
+                ("<Control-s>", self.save_xyz), ("<Control-q>", self.root.destroy),
+                ("n", self.toggle_labels), ("N", self.toggle_labels))
         for seq, fn in keys:
-            self.root.bind(seq, fn)
+            self.root.bind(seq, lambda e, fn=fn: None if self.typing() else fn())
         for k, (key, _label) in enumerate(MODELS):
-            self.root.bind(str(k + 1), lambda e, key=key: self.set_model(key))
-        # the table handles arrow keys itself; keep ours
-        for seq, d in (("<Left>", -1), ("<Up>", -1), ("<Right>", 1), ("<Down>", 1)):
-            self.tree.bind(seq, lambda e, d=d: (self.step(d), "break")[1])
+            self.root.bind(str(k + 1), lambda e, key=key: None if self.typing() else self.set_model(key))
+        # the tables handle arrow keys themselves; keep ours
+        for tree in (self.tree, self.vtree):
+            for seq, d in (("<Left>", -1), ("<Up>", -1), ("<Right>", 1), ("<Down>", 1)):
+                tree.bind(seq, lambda e, d=d: (self.step(d), "break")[1])
+
+    def build_vib_tab(self, vf):
+        ttk.Label(vf, text="Click a mode to animate it. Imaginary modes are red. "
+                           "Click a peak in the spectrum to pick its mode.",
+                  foreground="#666", wraplength=560).pack(anchor="w")
+        tf = ttk.Frame(vf)
+        tf.pack(fill="x", pady=(4, 0))
+        cols = ("no", "freq", "ir")
+        self.vtree = ttk.Treeview(tf, columns=cols, show="headings", selectmode="browse", height=8)
+        for c, t, w in zip(cols, ("Mode", "Frequency (cm⁻¹)", "IR intensity (km/mol)"), (70, 150, 170)):
+            self.vtree.heading(c, text=t)
+            self.vtree.column(c, width=w, anchor="e")
+        self.vtree.tag_configure("imag", foreground="#c62828")
+        sb = ttk.Scrollbar(tf, orient="vertical", command=self.vtree.yview)
+        self.vtree.configure(yscrollcommand=sb.set)
+        self.vtree.pack(side="left", fill="x", expand=True)
+        sb.pack(side="right", fill="y")
+        self.vtree.bind("<<TreeviewSelect>>", self.vtree_select)
+
+        self.spec = tk.Canvas(vf, height=230, bg="white", highlightthickness=0)
+        self.spec.pack(fill="x", pady=4)
+        self.spec.bind("<Button-1>", self.spec_click)
+        self.spec.bind("<Configure>", lambda e: self.draw_spec())
+
+        r1 = ttk.Frame(vf)
+        r1.pack(fill="x", pady=2)
+        self.b_anim = ttk.Button(r1, text="Animate", width=9, command=self.toggle_anim)
+        self.b_anim.pack(side="left")
+        ttk.Label(r1, text="Amplitude").pack(side="left", padx=(10, 2))
+        ttk.Scale(r1, from_=0.1, to=1.0, variable=self.amp, length=110).pack(side="left")
+        ttk.Checkbutton(r1, text="Arrows", variable=self.show_arrows,
+                        command=self.schedule_view).pack(side="left", padx=(10, 0))
+        ttk.Label(r1, text="Peak width (cm⁻¹)").pack(side="left", padx=(12, 2))
+        sp = ttk.Spinbox(r1, from_=2, to=200, increment=2, width=5, textvariable=self.fwhm,
+                         command=self.draw_spec)
+        sp.pack(side="left")
+        sp.bind("<Return>", lambda e: self.draw_spec())
+        sp.bind("<FocusOut>", lambda e: self.draw_spec())
+
+        box = ttk.LabelFrame(vf, text="Displace along the selected mode (start structures for IRC / follow-up opt)",
+                             padding=6)
+        box.pack(fill="x", pady=(6, 0))
+        ttk.Label(box, text="Step: the atom that moves most moves").pack(side="left")
+        ttk.Spinbox(box, from_=0.01, to=1.0, increment=0.01, width=6, format="%.2f",
+                    textvariable=self.disp_step).pack(side="left", padx=4)
+        ttk.Label(box, text="Å").pack(side="left")
+        self.b_disp = ttk.Button(box, text="Save forward + backward .xyz…", command=self.save_displaced)
+        self.b_disp.pack(side="left", padx=(12, 0))
+
+    def typing(self):
+        w = self.root.focus_get()
+        return isinstance(w, (tk.Entry, ttk.Entry, tk.Spinbox))
 
     def set_model(self, key):
         self.model.set(key)
@@ -557,12 +791,14 @@ class App:
         self.removed, self.undo_stack, self.selected, self.current = set(), [], set(), 0
         self.bond_cache = {}
         self.measure = list(self.scan_coord[1]) if self.scan_coord else []
+        self.vib, self.vib_sel = res.vib, None
         ext = 1.0
-        for f in self.frames:
-            c = centroid(f.atoms)
-            for a in f.atoms:
+        for atoms in [f.atoms for f in self.frames] + ([self.vib.atoms] if self.vib else []):
+            c = centroid(atoms)
+            for a in atoms:
                 ext = max(ext, length((a[1] - c[0], a[2] - c[1], a[3] - c[2])) + 0.6)
         self.extent = ext
+        self.fill_vib()
         self.rot, self.zoom = self.default_rot(), 1.0
         kinds = {"scan": "relaxed scan, %d converged points", "opt": "optimisation, %d steps",
                  "steps": "%d structures", "xyz": "multi-frame .xyz, %d frames", "single": "single structure"}
@@ -570,10 +806,206 @@ class App:
         prog = {"gaussian": "Gaussian", "orca": "ORCA", "xyz": "xyz"}.get(self.program, "")
         self.info.config(text="%s — %s %s, %d atoms" % (self.name, prog, k % len(self.frames) if "%d" in k else k,
                                                         len(self.frames[0].atoms)))
+        if self.vib:
+            n_im = sum(1 for m in self.vib.modes if m.freq < 0)
+            self.info.config(text=self.info.cget("text") + " · %d vibrations (%d imaginary)"
+                             % (len(self.vib.modes), n_im))
         self.root.title("%s — %s" % (APP, self.name))
         self.fill_tree()
         self.refresh()
+        # frequency job or a TS: open the Vibrations tab and animate the first imaginary mode
+        if self.vib and (self.kind == "single" or any(m.freq < 0 for m in self.vib.modes)):
+            self.nb.select(self.vib_tab)
+            self.anim_on = False
+            self.toggle_anim()
+        else:
+            self.nb.select(self.energy_tab)
+            self.stop_anim()
         return True
+
+    # ---------- vibrations
+    def fill_vib(self):
+        self.vtree.delete(*self.vtree.get_children())
+        if not self.vib:
+            self.nb.tab(self.vib_tab, state="disabled")
+            self.draw_spec()
+            return
+        self.nb.tab(self.vib_tab, state="normal")
+        for k, m in enumerate(self.vib.modes):
+            self.vtree.insert("", "end", iid=str(k), tags=("imag",) if m.freq < 0 else (),
+                              values=(m.label, ("%.2f" % m.freq) + (" (imag.)" if m.freq < 0 else ""),
+                                      "%.2f" % m.ir))
+        first = next((k for k, m in enumerate(self.vib.modes) if m.freq < 0), 0)
+        self.select_mode(first)
+
+    def vib_active(self):
+        return self.vib is not None and self.nb.select() == str(self.vib_tab)
+
+    def on_tab(self, _e=None):
+        if not hasattr(self, "vtree"):
+            return
+        if self.vib_active():
+            if self.anim_on and self.anim_job is None:
+                self.anim_tick()
+        self.measure = list(self.scan_coord[1]) if (self.scan_coord and not self.vib_active()) else []
+        self.schedule_view()
+
+    def select_mode(self, k):
+        if not self.vib or not (0 <= k < len(self.vib.modes)):
+            return
+        self.vib_sel = k
+        self.vib_busy = True
+        self.vtree.selection_set(str(k))
+        self.vtree.see(str(k))
+        self.root.after_idle(self._vib_free)
+        self.draw_spec()
+        self.schedule_view()
+
+    def _vib_free(self):
+        self.vib_busy = False
+
+    def vtree_select(self, _e):
+        if self.vib_busy:
+            return
+        sel = self.vtree.selection()
+        if sel:
+            self.select_mode(int(sel[0]))
+            if not self.anim_on:
+                self.toggle_anim()
+
+    def toggle_anim(self):
+        if self.anim_on:
+            self.stop_anim()
+            return
+        self.anim_on = True
+        self.b_anim.config(text="Stop")
+        if self.anim_job is None:
+            self.anim_tick()
+
+    def stop_anim(self):
+        self.anim_on = False
+        self.b_anim.config(text="Animate")
+        if self.anim_job is not None:
+            self.root.after_cancel(self.anim_job)
+            self.anim_job = None
+        self.phase = 0.0
+        self.schedule_view()
+
+    def anim_tick(self):
+        self.anim_job = None
+        if not self.anim_on or not self.vib_active():
+            return
+        self.phase = (self.phase + 2 * math.pi / 30) % (2 * math.pi)
+        self.draw_view()
+        self.anim_job = self.root.after(40, self.anim_tick)
+
+    def mode(self):
+        return self.vib.modes[self.vib_sel] if (self.vib and self.vib_sel is not None) else None
+
+    def number_from(self, var, lo, hi, what):
+        try:
+            v = float(var.get().replace(",", "."))
+        except ValueError:
+            v = None
+        if v is None or not lo <= v <= hi:
+            messagebox.showinfo(APP, "%s must be a number between %g and %g." % (what, lo, hi))
+            return None
+        return v
+
+    def save_displaced(self, folder=None):
+        m = self.mode()
+        if m is None:
+            return None
+        step = self.number_from(self.disp_step, 0.001, 2.0, "The step")
+        if step is None:
+            return None
+        ask = folder is None
+        if ask:
+            folder = filedialog.askdirectory(title="Folder for the two .xyz files",
+                                             initialdir=os.path.dirname(self.path) or ".")
+        if not folder:
+            return None
+        base = os.path.splitext(self.name)[0]
+        written = []
+        for sign, word in ((1, "fwd"), (-1, "bwd")):
+            atoms = displaced(self.vib.atoms, m.vec, sign * step)
+            path = os.path.join(folder, "%s_mode%s_%s.xyz" % (base, m.label, word))
+            with open(path, "w", newline="\n") as fh:
+                fh.write("%d\n%s %s%.3f A along mode %s (%.2f cm-1), largest atom move %.3f A\n"
+                         % (len(atoms), self.name, "+" if sign > 0 else "-", step, m.label, m.freq, step))
+                for el, x, y, z in atoms:
+                    fh.write("%-2s %14.8f %14.8f %14.8f\n" % (el, x, y, z))
+            written.append(path)
+        self.info.config(text="Saved %s and %s" % tuple(os.path.basename(p) for p in written))
+        if ask:
+            messagebox.showinfo(APP, "Saved two structures:\n\n%s\n%s\n\nin %s"
+                                % (os.path.basename(written[0]), os.path.basename(written[1]), folder))
+        return written
+
+    def draw_spec(self):
+        c = self.spec
+        c.delete("all")
+        self.spec_pts = []
+        W, H = max(c.winfo_width(), 200), max(c.winfo_height(), 120)
+        if not self.vib:
+            c.create_text(W / 2, H / 2, text="No frequencies in this file.", fill="#667085")
+            return
+        real = [m for m in self.vib.modes if m.freq > 0]
+        if not real:
+            c.create_text(W / 2, H / 2, text="Only imaginary modes — no spectrum.", fill="#667085")
+            return
+        try:
+            fwhm = max(1.0, min(500.0, float(self.fwhm.get().replace(",", "."))))
+        except ValueError:
+            fwhm = 20.0
+        top = max(m.freq for m in real)
+        hi = 4000.0 if top <= 3800 else math.ceil((top + 200) / 500.0) * 500
+        ml, mr, mt, mb = 50, 14, 14, 36
+
+        def X(nu):                            # high wavenumbers on the left, as usual for IR
+            return ml + (hi - nu) / hi * (W - ml - mr)
+
+        curve = ir_curve(real, 0.0, hi, fwhm, max(200, int(W - ml - mr)))
+        ymax = max([v for _, v in curve] + [m.ir for m in real]) or 1.0
+
+        def Y(v):
+            return H - mb - v / ymax * (H - mt - mb)
+
+        for t in range(0, int(hi) + 1, 500):
+            c.create_line(X(t), mt, X(t), H - mb, fill="#eef1f6")
+            c.create_text(X(t), H - mb + 12, text=str(t), fill="#667085", font=("Helvetica", 9))
+        c.create_line(ml, H - mb, W - mr, H - mb, fill="#9aa3b2")
+        c.create_line(ml, mt, ml, H - mb, fill="#9aa3b2")
+        c.create_text((ml + W - mr) / 2, H - 8, text="Wavenumber (cm⁻¹)", font=("Helvetica", 10))
+        try:
+            c.create_text(14, (mt + H - mb) / 2, text="IR intensity", angle=90, font=("Helvetica", 10))
+        except tk.TclError:
+            pass
+        sel = self.mode()
+        for m in real:
+            x = X(m.freq)
+            on = m is sel
+            c.create_line(x, Y(0), x, Y(m.ir), fill="#d43c3c" if on else "#9aa3b2", width=3 if on else 1)
+            self.spec_pts.append((x, self.vib.modes.index(m)))
+        pts = []
+        for nu, v in curve:
+            pts += [X(nu), Y(v)]
+        c.create_line(*pts, fill="#2f6fdf", width=2)
+        n_im = len(self.vib.modes) - len(real)
+        if n_im:
+            c.create_text(W - mr - 4, mt + 2, anchor="ne", fill="#c62828", font=("Helvetica", 9),
+                          text="%d imaginary mode%s not shown in the spectrum" % (n_im, "" if n_im == 1 else "s"))
+
+    def spec_click(self, e):
+        best = None
+        for x, k in self.spec_pts:
+            d = abs(x - e.x)
+            if d <= 8 and (best is None or d < best[0]):
+                best = (d, k)
+        if best:
+            self.select_mode(best[1])
+            if not self.anim_on:
+                self.toggle_anim()
 
     def x_label(self):
         return self.LABELS.get(self.kind, "Point")
@@ -602,7 +1034,7 @@ class App:
         self.refresh()
 
     def remove_action(self):
-        if len(self.frames) > 1:
+        if len(self.frames) > 1 and not self.vib_active():
             self.remove_points(sorted(self.selected) if self.selected else [self.current])
 
     def undo(self):
@@ -623,6 +1055,10 @@ class App:
         self.refresh()
 
     def step(self, d):
+        if self.vib_active():
+            if self.vib_sel is not None:
+                self.select_mode(max(0, min(len(self.vib.modes) - 1, self.vib_sel + d)))
+            return
         vis = self.visible()
         if not vis:
             return
@@ -814,8 +1250,26 @@ class App:
             self.projected = []
             return
         model = self.model.get()
-        atoms = self.frames[self.current].atoms
-        cx, cy, cz = centroid(atoms)
+        mode = self.mode() if self.vib_active() else None
+        if self.vib_active():
+            eq = self.vib.atoms
+            cx, cy, cz = centroid(eq)
+            atoms = eq
+            if mode is not None and self.anim_on:
+                atoms = displaced(eq, mode.vec, self.amp.get() * math.sin(self.phase))
+            cache_key = "vib"
+            self.shown_atoms = eq             # measure on the resting structure
+            if mode is not None:
+                self.title.config(text="Vibration — mode %s: %.2f cm⁻¹%s" % (
+                    mode.label, mode.freq, " (imaginary)" if mode.freq < 0 else ""))
+        else:
+            atoms = self.frames[self.current].atoms
+            cx, cy, cz = centroid(atoms)
+            cache_key = self.current
+            self.shown_atoms = atoms
+            f = self.frames[self.current]
+            self.title.config(text="Structure — %s %d%s" % (self.x_label().lower(), self.current + 1,
+                                                           " (%s)" % f.status if f.status else ""))
         R = self.rot
         extent = self.extent + (1.3 if model == "space" else 0.0)
         s = min(W, H) / (2 * extent) * self.zoom
@@ -826,9 +1280,9 @@ class App:
             proj.append({"i": i, "el": el, "sx": W / 2 + p[0] * s, "sy": H / 2 - p[1] * s, "z": p[2],
                          "r": atom_radius(el, model) * s})
         self.projected = proj
-        bonds = self.bond_cache.get(self.current)
-        if bonds is None:
-            bonds = self.bond_cache[self.current] = bonds_of(atoms)
+        bonds = self.bond_cache.get(cache_key)
+        if bonds is None:                     # bonds from the resting structure, so they don't flicker
+            bonds = self.bond_cache[cache_key] = bonds_of(self.vib.atoms if cache_key == "vib" else atoms)
 
         items = []
         if model != "space":
@@ -883,6 +1337,16 @@ class App:
                 c.create_oval(x - r, y - r, x + r, y + r, fill=shade(col, -0.15), outline="#3a4250")
                 c.create_oval(x - r * 0.85, y - r * 0.9, x + r * 0.7, y + r * 0.65, fill=col, outline="")
                 c.create_oval(x - r * 0.55, y - r * 0.6, x - r * 0.05, y - r * 0.15, fill=shade(col, 0.6), outline="")
+        if mode is not None and self.show_arrows.get():   # displacement arrows
+            mm = max_move(mode.vec) or 1.0
+            for p, v in zip(proj, mode.vec):
+                q = [R[k][0] * v[0] + R[k][1] * v[1] + R[k][2] * v[2] for k in range(3)]
+                dx, dy = q[0] / mm * 1.0 * s, -q[1] / mm * 1.0 * s
+                if math.hypot(dx, dy) < 4:
+                    continue
+                c.create_line(p["sx"], p["sy"], p["sx"] + dx, p["sy"] + dy, fill="#d4380d", width=2.5,
+                              arrow="last", arrowshape=(10, 12, 4))
+
         def hidden(p):                        # spacefill: centre covered by a closer atom
             return model == "space" and any(
                 q["z"] > p["z"] and math.hypot(q["sx"] - p["sx"], q["sy"] - p["sy"]) < q["r"] * 0.8 for q in proj)
@@ -938,8 +1402,8 @@ class App:
 
     def update_measure(self):
         txt = ""
-        if self.frames:
-            atoms = self.frames[self.current].atoms
+        atoms = getattr(self, "shown_atoms", None)
+        if atoms:
             if len(self.measure) >= 2:
                 mv = measure_value(atoms, self.measure)
                 if mv:
@@ -954,9 +1418,6 @@ class App:
     def refresh(self, tree=True):
         if not self.frames:
             return
-        f = self.frames[self.current]
-        self.title.config(text="Structure — %s %d%s" % (self.x_label().lower(), self.current + 1,
-                                                       " (%s)" % f.status if f.status else ""))
         self.b_remove.config(text=("Remove %d marked points" % len(self.selected)) if self.selected
                              else "Remove point %d" % (self.current + 1))
         self.b_undo.state(["!disabled"] if self.undo_stack else ["disabled"])
