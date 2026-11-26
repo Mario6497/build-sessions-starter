@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""molstudio.py - Molecule studio, a local Molden-like viewer (build step 2).
+"""molstudio.py - Molecule studio, a local Molden-like viewer and editor (build step 3).
 
 Opens Gaussian .log/.out, ORCA .out, ORCA _trj.xyz and .xyz files (single or
 multi-frame). Relaxed scans show only the converged point of every scan step;
@@ -8,6 +8,9 @@ rotatable 3D structure on the right.
 Vibrations tab (Gaussian / ORCA frequency jobs): frequency list, animated
 normal modes with arrows, IR spectrum, and forward/backward structures
 displaced along a mode (e.g. the imaginary mode of a TS) saved as .xyz.
+Editor tab: set bonds, angles, dihedrals; add, change, delete atoms; undo/redo;
+fragment library; your own fragments are kept in my_fragments.json next to
+this program.
 
 Start (Ubuntu):
     python3 molstudio.py              opens the made-up sample scan
@@ -19,12 +22,13 @@ Keys: Ctrl+O open · Ctrl+Shift+S save this structure · Ctrl+S save all points 
 Needs only the Python standard library with tkinter (sudo apt install python3-tk).
 """
 import glob
+import json
 import math
 import os
 import re
 import sys
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 APP = "Molecule studio"
 
@@ -527,6 +531,347 @@ def shade(hexcol, f):
     return "#%02x%02x%02x" % (int(r), int(g), int(b))
 
 
+def unit(v):
+    L = math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
+    return (v[0] / L, v[1] / L, v[2] / L) if L > 1e-12 else (0.0, 0.0, 0.0)
+
+
+def vsub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def vadd(a, b, f=1.0):
+    return (a[0] + f * b[0], a[1] + f * b[1], a[2] + f * b[2])
+
+
+def perp_to(u):
+    """Any unit vector perpendicular to u."""
+    other = (1.0, 0.0, 0.0) if abs(u[0]) < 0.9 else (0.0, 1.0, 0.0)
+    return unit(cross(u, other))
+
+
+def rotate(v, axis, ang):
+    """Rotate vector v around unit axis by ang (radians), Rodrigues formula."""
+    c, s = math.cos(ang), math.sin(ang)
+    kv = cross(axis, v)
+    kd = dot(axis, v)
+    return tuple(v[i] * c + kv[i] * s + axis[i] * kd * (1 - c) for i in range(3))
+
+
+def aligner(a, b):
+    """Function that rotates vectors so that unit vector a points along unit vector b."""
+    ax = cross(a, b)
+    if length(ax) < 1e-9:
+        if dot(a, b) > 0:
+            return lambda v: tuple(v)
+        p = perp_to(a)
+        return lambda v: rotate(v, p, math.pi)
+    ang = math.acos(max(-1.0, min(1.0, dot(a, b))))
+    ax = unit(ax)
+    return lambda v: rotate(v, ax, ang)
+
+
+def neighbours(n, bonds):
+    adj = {i: set() for i in range(n)}
+    for a, b in bonds:
+        adj[a].add(b)
+        adj[b].add(a)
+    return adj
+
+
+def side_of(n, bonds, fixed, start):
+    """Atoms reached from `start` without using the bond start-fixed (contains `fixed` in a ring)."""
+    adj = neighbours(n, bonds)
+    seen, stack = {start}, [start]
+    while stack:
+        x = stack.pop()
+        for y in adj[x]:
+            if x == start and y == fixed:
+                continue
+            if y not in seen:
+                seen.add(y)
+                stack.append(y)
+    return seen
+
+
+def set_internal(atoms, picks, value, only_last=False):
+    """New atoms with bond (2 picks), angle (3) or dihedral (4) set to value.
+    The side of the last picked atom moves; in a ring (or with only_last) only the last atom moves."""
+    n = len(atoms)
+    bonds = bonds_of(atoms)
+    pos = [tuple(a[1:]) for a in atoms]
+    k = len(picks)
+    if k not in (2, 3, 4) or len(set(picks)) != k:
+        raise ValueError("Pick 2, 3 or 4 different atoms.")
+    cur = measure_value(atoms, picks)[1]
+    last = picks[-1]
+    # the moving side: cut the bond picks[-2]-picks[-1] (dihedral: the middle bond picks[1]-picks[2])
+    fixed, start = (picks[1], picks[2]) if k == 4 else (picks[-2], picks[-1])
+    group = {last} if only_last else side_of(n, bonds, fixed, start)
+    if any(p in group for p in picks[:picks.index(start)]):
+        group = {last}                        # ring: the two sides are connected
+    if k == 2:
+        if not 0.3 <= value <= 10:
+            raise ValueError("A bond length must be between 0.3 and 10 Å.")
+        u = unit(vsub(pos[picks[1]], pos[picks[0]]))
+        for g in group:
+            pos[g] = vadd(pos[g], u, value - cur)
+    else:
+        if k == 3:
+            if not 1 <= value <= 179.9:
+                raise ValueError("An angle must be between 1 and 179.9°.")
+            i, j, kk = picks
+            centre = pos[j]
+            axis = cross(vsub(pos[i], pos[j]), vsub(pos[kk], pos[j]))
+            axis = unit(axis) if length(axis) > 1e-6 else perp_to(unit(vsub(pos[kk], pos[j])))
+            delta = value - cur
+        else:
+            if not -360 <= value <= 360:
+                raise ValueError("A dihedral must be between -180 and 180°.")
+            centre = pos[picks[1]]
+            axis = unit(vsub(pos[picks[2]], pos[picks[1]]))
+            delta = (value - cur + 180) % 360 - 180
+        start = list(pos)
+        for sign in (1, -1):                  # try one direction, check, else the other
+            pos = list(start)
+            for g in group:
+                pos[g] = vadd(centre, rotate(vsub(pos[g], centre), axis, math.radians(sign * delta)))
+            trial = [(a[0],) + pos[x] for x, a in enumerate(atoms)]
+            got = measure_value(trial, picks)[1]
+            diff = abs((got - value + 180) % 360 - 180) if k == 4 else abs(got - value)
+            if diff < 1e-6:
+                break
+    return [(a[0],) + pos[x] for x, a in enumerate(atoms)]
+
+
+def free_direction(atoms, bonds, p):
+    """A sensible direction for a new bond on atom p (away from its neighbours and other atoms)."""
+    pos = [tuple(a[1:]) for a in atoms]
+    nb = sorted(neighbours(len(atoms), bonds)[p])
+    vs = [unit(vsub(pos[q], pos[p])) for q in nb]
+    cands = []
+    if not vs:
+        cands = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (-1.0, 0.0, 0.0)]
+    elif len(vs) == 1:
+        u, pp = vs[0], perp_to(vs[0])
+        t = math.radians(109.47)
+        for k in range(12):                   # tetrahedral angle, best turn around the bond
+            w = rotate(pp, u, 2 * math.pi * k / 12)
+            cands.append(unit(vadd(tuple(c * math.cos(t) for c in u), w, math.sin(t))))
+    else:
+        s = (sum(v[0] for v in vs), sum(v[1] for v in vs), sum(v[2] for v in vs))
+        if length(s) > 0.3:
+            cands = [unit((-s[0], -s[1], -s[2]))]
+        else:                                 # planar or linear: go out of the plane
+            c = cross(vs[0], vs[1])
+            c = unit(c) if length(c) > 1e-6 else perp_to(vs[0])
+            cands = [c, (-c[0], -c[1], -c[2])]
+
+    def room(d):
+        tip = vadd(pos[p], d, 1.1)
+        return min([length(vsub(tip, q)) for x, q in enumerate(pos) if x != p] or [99.0])
+    return max(cands, key=room)
+
+
+def zmat_build(rows):
+    """Cartesian positions from simple Z-matrix rows (el, a, r[, b, angle[, c, dihedral]]), 0-based refs."""
+    pos = []
+    for k, row in enumerate(rows):
+        refs = row[1:]
+        if k == 0:
+            p = (0.0, 0.0, 0.0)
+        elif len(refs) == 2:
+            p = vadd(pos[refs[0]], (1.0, 0.0, 0.0), refs[1])
+        elif len(refs) == 4:
+            a, r, b, ang = refs
+            u = unit(vsub(pos[b], pos[a]))
+            v = unit((-u[1], u[0], 0.0)) if abs(u[2]) < 0.99 else (0.0, 1.0, 0.0)
+            t = math.radians(ang)
+            p = vadd(pos[a], vadd(tuple(c * math.cos(t) for c in u), v, math.sin(t)), r)
+        else:
+            a, r, b, ang, c, dih = refs
+            A, B, C = pos[a], pos[b], pos[c]
+            bc = unit(vsub(A, B))
+            nn = cross(vsub(B, C), bc)
+            nn = unit(nn) if length(nn) > 1e-9 else perp_to(bc)
+            m = cross(nn, bc)
+            t, f = math.radians(ang), math.radians(dih)
+            d2 = (-r * math.cos(t), r * math.sin(t) * math.cos(f), r * math.sin(t) * math.sin(f))
+            p = (A[0] + d2[0] * bc[0] + d2[1] * m[0] + d2[2] * nn[0],
+                 A[1] + d2[0] * bc[1] + d2[1] * m[1] + d2[2] * nn[1],
+                 A[2] + d2[0] * bc[2] + d2[1] * m[2] + d2[2] * nn[2])
+        pos.append(p)
+    return pos
+
+
+def normalise_fragment(atoms, parent):
+    """Fragment frame: first atom (the one that bonds) at the origin, parent direction along -x."""
+    a0 = tuple(atoms[0][1:])
+    d = unit(vsub(parent, a0))
+    f = aligner(d, (-1.0, 0.0, 0.0)) if length(d) > 0 else (lambda v: tuple(v))
+    return [(el,) + tuple(round(c, 6) for c in f(vsub((x, y, z), a0))) for el, x, y, z in atoms]
+
+
+def ring_fragment(ring, hs, d):
+    """Planar ring, first ring atom bonds to the parent."""
+    n = len(ring)
+    R = d / (2 * math.sin(math.pi / n))
+    centre = (R, 0.0, 0.0)
+    atoms = []
+    for k, el in enumerate(ring):
+        a = math.pi + 2 * math.pi * k / n
+        atoms.append((el, R + R * math.cos(a), R * math.sin(a), 0.0))
+    for k in hs:
+        p = tuple(atoms[k][1:])
+        atoms.append(("H",) + vadd(p, unit(vsub(p, centre)), 1.08))
+    return normalise_fragment(atoms, (-1.5, 0.0, 0.0))
+
+
+def saturated_ring(n, d, puckered):
+    """Cyclohexyl (chair) or cyclopentyl; first ring atom bonds to the parent."""
+    R = d / (2 * math.sin(math.pi / n)) if not puckered else math.sqrt(max(0.01, d * d - 0.25))
+    atoms, hs, parent = [], [], None
+    for k in range(n):
+        a = math.pi + 2 * math.pi * k / n
+        z = (0.25 if k % 2 == 0 else -0.25) if puckered else 0.0
+        atoms.append(("C", R + R * math.cos(a), R * math.sin(a), z))
+    for k in range(n):
+        p = tuple(atoms[k][1:])
+        rad = unit((p[0] - R, p[1], 0.0))
+        if puckered:
+            sg = 1.0 if p[2] > 0 else -1.0
+            up = (0.0, 0.0, sg)                                  # axial
+            other = unit(vadd(rad, (0.0, 0.0, -sg), 0.33))       # equatorial
+        else:
+            up = unit(vadd(tuple(c * 0.57 for c in rad), (0.0, 0.0, 0.82)))
+            other = unit(vadd(tuple(c * 0.57 for c in rad), (0.0, 0.0, -0.82)))
+        if k == 0:
+            parent = vadd(p, other, 1.53)
+            hs.append(("H",) + vadd(p, up, 1.09))
+        else:
+            hs.append(("H",) + vadd(p, up, 1.09))
+            hs.append(("H",) + vadd(p, other, 1.09))
+    return normalise_fragment(atoms + hs, parent)
+
+
+T = 109.47
+
+
+def _methyl_h(c, a, d):
+    return [("H", c, 1.09, a, T, d, 180), ("H", c, 1.09, a, T, d, 60), ("H", c, 1.09, a, T, d, -60)]
+
+
+# atom 0 is the parent (removed), atom 1 bonds to it
+FRAGMENT_ZMAT = {
+    "Methyl": [("C", 0, 1.53), ("H", 1, 1.09, 0, T), ("H", 1, 1.09, 0, T, 2, 120), ("H", 1, 1.09, 0, T, 2, -120)],
+    "Ethyl": [("C", 0, 1.53), ("C", 1, 1.53, 0, T), ("H", 1, 1.09, 0, T, 2, 120), ("H", 1, 1.09, 0, T, 2, -120)]
+    + _methyl_h(2, 1, 0),
+    "tert-Butyl": [("C", 0, 1.54), ("C", 1, 1.54, 0, T), ("C", 1, 1.54, 0, T, 2, 120), ("C", 1, 1.54, 0, T, 2, -120)]
+    + _methyl_h(2, 1, 0) + _methyl_h(3, 1, 0) + _methyl_h(4, 1, 0),
+    "Vinyl": [("C", 0, 1.50), ("C", 1, 1.33, 0, 123), ("H", 1, 1.08, 2, 118, 0, 180),
+              ("H", 2, 1.08, 1, 121, 0, 0), ("H", 2, 1.08, 1, 121, 0, 180)],
+    "Hydroxyl (OH)": [("O", 0, 1.43), ("H", 1, 0.96, 0, 108)],
+    "Methoxy (OMe)": [("O", 0, 1.43), ("C", 1, 1.42, 0, 112)] + _methyl_h(2, 1, 0),
+    "Thiol (SH)": [("S", 0, 1.82), ("H", 1, 1.34, 0, 96)],
+    "Amino (NH2)": [("N", 0, 1.45), ("H", 1, 1.01, 0, 110), ("H", 1, 1.01, 0, 110, 2, 120)],
+    "Dimethylamino (NMe2)": [("N", 0, 1.45), ("C", 1, 1.45, 0, 112), ("C", 1, 1.45, 0, 112, 2, 125)]
+    + _methyl_h(2, 1, 0) + _methyl_h(3, 1, 0),
+    "Formyl (CHO)": [("C", 0, 1.50), ("O", 1, 1.21, 0, 124), ("H", 1, 1.10, 0, 115, 2, 180)],
+    "Acetyl (COMe)": [("C", 0, 1.51), ("O", 1, 1.21, 0, 121), ("C", 1, 1.51, 0, 118, 2, 180),
+                      ("H", 3, 1.09, 1, T, 2, 0), ("H", 3, 1.09, 1, T, 2, 120), ("H", 3, 1.09, 1, T, 2, -120)],
+    "Carboxyl (COOH)": [("C", 0, 1.50), ("O", 1, 1.21, 0, 124), ("O", 1, 1.35, 0, 112, 2, 180),
+                        ("H", 3, 0.97, 1, 106, 2, 0)],
+    "Methyl ester (COOMe)": [("C", 0, 1.50), ("O", 1, 1.21, 0, 124), ("O", 1, 1.34, 0, 112, 2, 180),
+                             ("C", 3, 1.44, 1, 116, 2, 0)] + _methyl_h(4, 3, 1),
+    "Amide (CONH2)": [("C", 0, 1.51), ("O", 1, 1.23, 0, 121), ("N", 1, 1.35, 0, 116, 2, 180),
+                      ("H", 3, 1.01, 1, 119, 2, 0), ("H", 3, 1.01, 1, 121, 2, 180)],
+    "Nitro (NO2)": [("N", 0, 1.47), ("O", 1, 1.22, 0, 117), ("O", 1, 1.22, 0, 117, 2, 180)],
+    "Trifluoromethyl (CF3)": [("C", 0, 1.50), ("F", 1, 1.34, 0, 111), ("F", 1, 1.34, 0, 111, 2, 120),
+                              ("F", 1, 1.34, 0, 111, 2, -120)],
+    "Fluoro (F)": [("F", 0, 1.35)],
+    "Chloro (Cl)": [("Cl", 0, 1.77)],
+    "Bromo (Br)": [("Br", 0, 1.94)],
+    "Iodo (I)": [("I", 0, 2.14)],
+}
+
+
+def build_library():
+    lib = {}
+    for name, rows in FRAGMENT_ZMAT.items():
+        pos = zmat_build([("X",)] + list(rows))
+        atoms = [(rows[k][0],) + pos[k + 1] for k in range(len(rows))]
+        lib[name] = normalise_fragment(atoms, pos[0])
+    lib["Ethynyl"] = [("C", 0.0, 0.0, 0.0), ("C", 1.20, 0.0, 0.0), ("H", 2.26, 0.0, 0.0)]
+    lib["Nitrile (CN)"] = [("C", 0.0, 0.0, 0.0), ("N", 1.16, 0.0, 0.0)]
+    lib["Phenyl"] = ring_fragment("CCCCCC", (1, 2, 3, 4, 5), 1.39)
+    lib["2-Pyridyl"] = ring_fragment("CNCCCC", (2, 3, 4, 5), 1.39)
+    lib["3-Pyridyl"] = ring_fragment("CCNCCC", (1, 3, 4, 5), 1.39)
+    lib["4-Pyridyl"] = ring_fragment("CCCNCC", (1, 2, 4, 5), 1.39)
+    lib["2-Furyl"] = ring_fragment("COCCC", (2, 3, 4), 1.39)
+    lib["2-Thienyl"] = ring_fragment("CSCCC", (2, 3, 4), 1.55)
+    lib["Cyclohexyl (chair)"] = saturated_ring(6, 1.53, True)
+    lib["Cyclopentyl"] = saturated_ring(5, 1.54, False)
+    return lib
+
+
+LIBRARY_GROUPS = (
+    ("Alkyl and alkenyl", ("Methyl", "Ethyl", "tert-Butyl", "Vinyl", "Ethynyl")),
+    ("Rings", ("Phenyl", "2-Pyridyl", "3-Pyridyl", "4-Pyridyl", "2-Furyl", "2-Thienyl",
+               "Cyclohexyl (chair)", "Cyclopentyl")),
+    ("O, N, S groups", ("Hydroxyl (OH)", "Methoxy (OMe)", "Thiol (SH)", "Amino (NH2)", "Dimethylamino (NMe2)",
+                        "Nitro (NO2)", "Nitrile (CN)")),
+    ("Carbonyl groups", ("Formyl (CHO)", "Acetyl (COMe)", "Carboxyl (COOH)", "Methyl ester (COOMe)",
+                         "Amide (CONH2)")),
+    ("Halogens", ("Fluoro (F)", "Chloro (Cl)", "Bromo (Br)", "Iodo (I)", "Trifluoromethyl (CF3)")),
+)
+LIBRARY = build_library()
+
+
+def attach_fragment(atoms, pick, frag):
+    """Put a fragment on the structure. If `pick` is an H with one bond, the fragment replaces it
+    (its first atom takes the H's number); otherwise it is bonded to `pick`.
+    An empty structure gets the fragment with an H on its free end."""
+    if not atoms:
+        cap = ("H", -(COV.get(frag[0][0], 0.76) + COV["H"]), 0.0, 0.0)
+        return [tuple(a) for a in frag] + [cap]
+    bonds = bonds_of(atoms)
+    pos = [tuple(a[1:]) for a in atoms]
+    nb = sorted(neighbours(len(atoms), bonds)[pick])
+    if atoms[pick][0] == "H" and len(nb) == 1:
+        parent, u, replace = nb[0], unit(vsub(pos[pick], pos[nb[0]])), True
+    else:
+        parent, u, replace = pick, free_direction(atoms, bonds, pick), False
+    L = COV.get(atoms[parent][0], 1.4) + COV.get(frag[0][0], 1.4)
+    anchor = vadd(pos[parent], u, L)
+    f = aligner((1.0, 0.0, 0.0), u)
+    others = [q for x, q in enumerate(pos) if not (replace and x == pick) and x != parent]
+    best = None
+    for k in range(12):                       # turn around the new bond to avoid clashes
+        tw = 2 * math.pi * k / 12
+        new = [(el,) + vadd(anchor, f(rotate((x, y, z), (1.0, 0.0, 0.0), tw))) for el, x, y, z in frag]
+        room = min([length(vsub(tuple(a[1:]), q)) for a in new[1:] for q in others] or [99.0])
+        if best is None or room > best[0] + 1e-9:
+            best = (room, new)
+    new = best[1]
+    if replace:
+        out = list(atoms)
+        out[pick] = new[0]
+        return out + new[1:]
+    return list(atoms) + new
+
+
+def cut_fragment(atoms, parent, first):
+    """The part on `first`'s side of the bond parent-first, in the fragment frame."""
+    bonds = bonds_of(atoms)
+    if (min(parent, first), max(parent, first)) not in {(min(a, b), max(a, b)) for a, b in bonds}:
+        raise ValueError("The two picked atoms are not bonded.")
+    group = side_of(len(atoms), bonds, parent, first)
+    if parent in group:
+        raise ValueError("These atoms are in a ring, so there is no separate fragment to cut off.")
+    order = [first] + sorted(g for g in group if g != first)
+    return normalise_fragment([atoms[g] for g in order], tuple(atoms[parent][1:]))
+
+
 def nice_ticks(lo, hi, count):
     span = (hi - lo) or 1.0
     raw = span / count
@@ -567,6 +912,13 @@ class App:
         self.show_arrows = tk.BooleanVar(value=True)
         self.fwhm = tk.StringVar(value="20")
         self.disp_step = tk.StringVar(value="0.10")
+        self.ed_atoms, self.ed_undo, self.ed_redo, self.ed_extent = [], [], [], 3.0
+        self.ed_value = tk.StringVar(value="")
+        self.ed_only_last = tk.BooleanVar(value=False)
+        self.ed_element = tk.StringVar(value="C")
+        self.ed_last_picks = None
+        self.my_frag_path = os.path.join(self.here, "my_fragments.json")
+        self.my_frags = self.read_my_frags()
         self.build_menu()
         self.build_ui()
 
@@ -630,8 +982,11 @@ class App:
         self.energy_tab, self.vib_tab = ef, vf
         self.nb.add(ef, text="Energy")
         self.nb.add(vf, text="Vibrations")
+        self.edit_tab = ttk.Frame(self.nb, padding=4)
+        self.nb.add(self.edit_tab, text="Editor")
         self.nb.bind("<<NotebookTabChanged>>", self.on_tab)
         self.build_vib_tab(vf)
+        self.build_edit_tab(self.edit_tab)
 
         ttk.Label(ef, text="Click a point to see its structure · Ctrl+click marks several · "
                            "←/→ step · Delete removes · double-click a removed row to bring it back",
@@ -695,6 +1050,7 @@ class App:
                 ("<Right>", lambda: self.step(1)), ("<Down>", lambda: self.step(1)),
                 ("<Delete>", self.remove_action), ("<BackSpace>", self.remove_action),
                 ("<Control-z>", self.undo), ("<Control-o>", self.open_dialog),
+                ("<Control-y>", self.ed_redo_action), ("<Control-Z>", self.ed_redo_action),
                 ("<Control-s>", self.save_xyz), ("<Control-q>", self.root.destroy),
                 ("<Control-S>", self.save_current), ("<Control-Shift-s>", self.save_current),
                 ("n", self.toggle_labels), ("N", self.toggle_labels))
@@ -754,6 +1110,252 @@ class App:
         ttk.Label(box, text="Å").pack(side="left")
         self.b_disp = ttk.Button(box, text="Save forward + backward .xyz…", command=self.save_displaced)
         self.b_disp.pack(side="left", padx=(12, 0))
+
+    # ---------- editor tab
+    def build_edit_tab(self, et):
+        ttk.Label(et, text="Click atoms in the 3D view to pick them (yellow rings). Click empty space to "
+                           "clear the picks. Every change can be undone (Ctrl+Z) and redone (Ctrl+Y).",
+                  foreground="#666", wraplength=560).pack(anchor="w")
+        r = ttk.Frame(et)
+        r.pack(fill="x", pady=(4, 2))
+        ttk.Button(r, text="Take structure from file", command=self.ed_take).pack(side="left")
+        ttk.Button(r, text="Clear all", command=self.ed_clear).pack(side="left", padx=4)
+        self.b_ed_undo = ttk.Button(r, text="Undo", command=self.ed_undo_action)
+        self.b_ed_undo.pack(side="left", padx=(12, 0))
+        self.b_ed_redo = ttk.Button(r, text="Redo", command=self.ed_redo_action)
+        self.b_ed_redo.pack(side="left", padx=4)
+        self.ed_status = ttk.Label(r, text="", foreground="#555")
+        self.ed_status.pack(side="left", padx=8)
+
+        g = ttk.LabelFrame(et, text="Bond, angle, dihedral (pick 2, 3 or 4 atoms)", padding=6)
+        g.pack(fill="x", pady=4)
+        self.ed_pick_lbl = ttk.Label(g, text="Nothing picked.")
+        self.ed_pick_lbl.grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(g, text="New value").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        e = ttk.Entry(g, textvariable=self.ed_value, width=10)
+        e.grid(row=1, column=1, padx=4, pady=(4, 0))
+        e.bind("<Return>", lambda ev: self.ed_set_value())
+        self.ed_unit = ttk.Label(g, text="")
+        self.ed_unit.grid(row=1, column=2, sticky="w", pady=(4, 0))
+        ttk.Button(g, text="Set", command=self.ed_set_value).grid(row=1, column=3, padx=8, pady=(4, 0))
+        ttk.Checkbutton(g, text="Move only the last picked atom (otherwise its whole side moves)",
+                        variable=self.ed_only_last).grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        a = ttk.LabelFrame(et, text="Atoms", padding=6)
+        a.pack(fill="x", pady=4)
+        ttk.Label(a, text="Element").pack(side="left")
+        ttk.Combobox(a, textvariable=self.ed_element, width=4, state="readonly",
+                     values=["H", "B", "C", "N", "O", "F", "Si", "P", "S", "Cl", "Br", "I", "Li", "Na", "K",
+                             "Mg", "Fe", "Cu", "Zn", "Pd", "Pt", "Au"]).pack(side="left", padx=4)
+        ttk.Button(a, text="Add to picked atom", command=self.ed_add_atom).pack(side="left", padx=(8, 0))
+        ttk.Button(a, text="Change element", command=self.ed_change_element).pack(side="left", padx=4)
+        ttk.Button(a, text="Delete picked (Del)", command=self.ed_delete).pack(side="left")
+
+        f = ttk.LabelFrame(et, text="Fragments", padding=6)
+        f.pack(fill="both", expand=True, pady=4)
+        ttk.Label(f, text="Pick an H to replace it, or another atom to attach to it, then double-click a "
+                          "fragment. An empty structure gets the fragment with an H on its free end.",
+                  foreground="#666", wraplength=540).pack(anchor="w")
+        body = ttk.Frame(f)
+        body.pack(fill="both", expand=True, pady=(4, 0))
+        self.ftree = ttk.Treeview(body, show="tree", selectmode="browse", height=9)
+        fsb = ttk.Scrollbar(body, orient="vertical", command=self.ftree.yview)
+        self.ftree.configure(yscrollcommand=fsb.set)
+        self.ftree.pack(side="left", fill="both", expand=True)
+        fsb.pack(side="left", fill="y")
+        self.ftree.bind("<Double-1>", lambda ev: self.ed_add_fragment())
+        btns = ttk.Frame(body)
+        btns.pack(side="left", fill="y", padx=(8, 0))
+        ttk.Button(btns, text="Add fragment", command=self.ed_add_fragment).pack(fill="x")
+        ttk.Button(btns, text="Save my fragment…", command=self.ed_save_my_fragment).pack(fill="x", pady=(12, 0))
+        ttk.Label(btns, text="Pick the atom it hangs on,\nthen its first atom.", foreground="#666").pack(anchor="w")
+        ttk.Button(btns, text="Delete my fragment", command=self.ed_delete_my_fragment).pack(fill="x", pady=(12, 0))
+        self.fill_fragments()
+        self.ed_update_buttons()
+
+    def read_my_frags(self):
+        try:
+            with open(self.my_frag_path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            return [{"name": d["name"], "atoms": [tuple(a) for a in d["atoms"]]} for d in data]
+        except (OSError, ValueError, KeyError, TypeError):
+            return []
+
+    def write_my_frags(self):
+        with open(self.my_frag_path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump([{"name": d["name"], "atoms": [list(a) for a in d["atoms"]]} for d in self.my_frags],
+                      fh, indent=1)
+
+    def fill_fragments(self):
+        t = self.ftree
+        t.delete(*t.get_children())
+        mine = t.insert("", "end", iid="grp:my", text="My fragments (%d)" % len(self.my_frags), open=True)
+        for k, d in enumerate(self.my_frags):
+            t.insert(mine, "end", iid="my:%d" % k, text=d["name"])
+        for gname, names in LIBRARY_GROUPS:
+            gid = t.insert("", "end", text=gname, open=False)
+            for nm in names:
+                t.insert(gid, "end", iid="lib:" + nm, text=nm)
+
+    def chosen_fragment(self):
+        sel = self.ftree.selection()
+        if not sel or ":" not in sel[0] or sel[0].startswith("grp:"):
+            return None, None
+        kind, key = sel[0].split(":", 1)
+        if kind == "lib":
+            return key, LIBRARY.get(key)
+        k = int(key)
+        return (self.my_frags[k]["name"], self.my_frags[k]["atoms"]) if k < len(self.my_frags) else (None, None)
+
+    def edit_active(self):
+        return self.nb.select() == str(self.edit_tab)
+
+    def ed_commit(self, atoms, what):
+        self.ed_undo.append(self.ed_atoms)
+        self.ed_redo = []
+        self.ed_atoms = atoms
+        self.ed_changed(what)
+
+    def ed_changed(self, what="", refit=False):
+        self.bond_cache.pop("ed", None)
+        if self.ed_atoms:
+            c = centroid(self.ed_atoms)
+            ext = max(2.5, max(length((a[1] - c[0], a[2] - c[1], a[3] - c[2])) for a in self.ed_atoms) + 0.6)
+            self.ed_extent = ext if refit else max(self.ed_extent, ext)
+        self.measure = [m for m in self.measure if m < len(self.ed_atoms)]
+        self.ed_last_picks = None
+        self.ed_update_buttons(what)
+        self.schedule_view()
+
+    def ed_update_buttons(self, what=""):
+        self.b_ed_undo.state(["!disabled"] if self.ed_undo else ["disabled"])
+        self.b_ed_redo.state(["!disabled"] if self.ed_redo else ["disabled"])
+        self.ed_status.config(text="%d atoms%s" % (len(self.ed_atoms), (" · " + what) if what else ""))
+
+    def ed_take(self):
+        if not self.frames:
+            return
+        src = self.frames[self.current].atoms
+        if self.ed_atoms:
+            self.ed_undo.append(self.ed_atoms)
+            self.ed_redo = []
+        self.ed_atoms = list(src)
+        self.measure = []
+        self.ed_extent = 2.5
+        self.ed_changed("taken from %s, %s %d" % (self.name, self.x_label().lower(), self.current + 1), refit=True)
+
+    def ed_clear(self):
+        if self.ed_atoms:
+            self.measure = []
+            self.ed_commit([], "cleared")
+            self.ed_extent = 3.0
+
+    def ed_undo_action(self):
+        if self.ed_undo:
+            self.ed_redo.append(self.ed_atoms)
+            self.ed_atoms = self.ed_undo.pop()
+            self.ed_changed("undone")
+
+    def ed_redo_action(self):
+        if self.edit_active() and self.ed_redo:
+            self.ed_undo.append(self.ed_atoms)
+            self.ed_atoms = self.ed_redo.pop()
+            self.ed_changed("redone")
+
+    def ed_set_value(self):
+        p = list(self.measure)
+        if len(p) < 2:
+            messagebox.showinfo(APP, "Pick 2 atoms for a bond, 3 for an angle or 4 for a dihedral.")
+            return
+        try:
+            v = float(self.ed_value.get().replace(",", "."))
+        except ValueError:
+            messagebox.showinfo(APP, "Type a number, e.g. 1.54 or 109.5.")
+            return
+        try:
+            new = set_internal(self.ed_atoms, p, v, self.ed_only_last.get())
+        except ValueError as exc:
+            messagebox.showinfo(APP, str(exc))
+            return
+        mv = measure_value(new, p)
+        self.ed_commit(new, "%s set to %s %s" % (mv[0].lower(), ("%.3f" if mv[2] == "Å" else "%.1f") % mv[1], mv[2]))
+
+    def ed_add_atom(self):
+        el = self.ed_element.get()
+        if not self.ed_atoms:
+            self.ed_commit([(el, 0.0, 0.0, 0.0)], "added %s" % el)
+            return
+        if len(self.measure) != 1:
+            messagebox.showinfo(APP, "Pick exactly one atom; the new atom is bonded to it.")
+            return
+        p = self.measure[0]
+        d = free_direction(self.ed_atoms, bonds_of(self.ed_atoms), p)
+        L = COV.get(self.ed_atoms[p][0], 1.4) + COV.get(el, 1.4)
+        new = list(self.ed_atoms) + [(el,) + vadd(tuple(self.ed_atoms[p][1:]), d, L)]
+        self.measure = [len(new) - 1]
+        self.ed_commit(new, "added %s%d" % (el, self.atom_no(len(new) - 1)))
+
+    def ed_change_element(self):
+        if not self.measure:
+            messagebox.showinfo(APP, "Pick the atom(s) to change first.")
+            return
+        el = self.ed_element.get()
+        new = [((el,) + tuple(a[1:])) if k in self.measure else a for k, a in enumerate(self.ed_atoms)]
+        self.ed_commit(new, "%d atom(s) changed to %s" % (len(self.measure), el))
+
+    def ed_delete(self):
+        if not self.measure:
+            return
+        gone = set(self.measure)
+        self.measure = []
+        self.ed_commit([a for k, a in enumerate(self.ed_atoms) if k not in gone], "deleted %d atom(s)" % len(gone))
+
+    def ed_add_fragment(self):
+        name, frag = self.chosen_fragment()
+        if frag is None:
+            messagebox.showinfo(APP, "Choose a fragment in the list first (open a group with its arrow).")
+            return
+        if self.ed_atoms and len(self.measure) != 1:
+            messagebox.showinfo(APP, "Pick one atom first: an H to replace, or an atom to attach the fragment to.")
+            return
+        pick = self.measure[0] if self.ed_atoms else 0
+        empty = not self.ed_atoms
+        new = attach_fragment(self.ed_atoms, pick, frag)
+        self.measure = []
+        self.ed_commit(new, "added %s" % name)
+        if empty:
+            self.ed_changed("added %s" % name, refit=True)
+
+    def ed_save_my_fragment(self):
+        if len(self.measure) != 2:
+            messagebox.showinfo(APP, "Pick 2 atoms: first the atom the fragment hangs on (it is not saved), "
+                                     "then the first atom of the fragment.")
+            return
+        try:
+            frag = cut_fragment(self.ed_atoms, self.measure[0], self.measure[1])
+        except ValueError as exc:
+            messagebox.showinfo(APP, str(exc))
+            return
+        name = simpledialog.askstring(APP, "Name for this fragment (%d atoms):" % len(frag), parent=self.root)
+        if name:
+            self.add_my_fragment(name.strip(), frag)
+
+    def add_my_fragment(self, name, frag):
+        self.my_frags.append({"name": name, "atoms": [tuple(a) for a in frag]})
+        self.write_my_frags()
+        self.fill_fragments()
+        self.ed_update_buttons("saved fragment '%s'" % name)
+
+    def ed_delete_my_fragment(self):
+        sel = self.ftree.selection()
+        if not sel or not sel[0].startswith("my:"):
+            messagebox.showinfo(APP, "Choose one of 'My fragments' first.")
+            return
+        k = int(sel[0][3:])
+        if messagebox.askyesno(APP, "Delete your fragment '%s'?" % self.my_frags[k]["name"]):
+            del self.my_frags[k]
+            self.write_my_frags()
+            self.fill_fragments()
 
     def typing(self):
         w = self.root.focus_get()
@@ -852,7 +1454,13 @@ class App:
         if self.vib_active():
             if self.anim_on and self.anim_job is None:
                 self.anim_tick()
-        self.measure = list(self.scan_coord[1]) if (self.scan_coord and not self.vib_active()) else []
+        if self.edit_active():
+            self.measure = []
+            if not self.ed_atoms and not self.ed_undo and self.frames:
+                self.ed_take()                # first visit: start from the structure on screen
+        else:
+            self.measure = list(self.scan_coord[1]) if (self.scan_coord and not self.vib_active()) else []
+        self.ed_last_picks = None
         self.schedule_view()
 
     def select_mode(self, k):
@@ -1039,10 +1647,16 @@ class App:
         self.refresh()
 
     def remove_action(self):
+        if self.edit_active():
+            self.ed_delete()
+            return
         if len(self.frames) > 1 and not self.vib_active():
             self.remove_points(sorted(self.selected) if self.selected else [self.current])
 
     def undo(self):
+        if self.edit_active():
+            self.ed_undo_action()
+            return
         if self.undo_stack:
             for i in self.undo_stack.pop():
                 self.removed.discard(i)
@@ -1060,6 +1674,8 @@ class App:
         self.refresh()
 
     def step(self, d):
+        if self.edit_active():
+            return
         if self.vib_active():
             if self.vib_sel is not None:
                 self.select_mode(max(0, min(len(self.vib.modes) - 1, self.vib_sel + d)))
@@ -1103,10 +1719,14 @@ class App:
 
     def save_current(self, path=None):
         """Save only the structure shown on the right (resting structure in the Vibrations tab)."""
-        if not self.frames:
+        editing = self.edit_active()
+        if (not self.frames and not editing) or (editing and not self.ed_atoms):
             return None
-        base = os.path.splitext(self.name)[0]
-        if self.vib_active():
+        base = os.path.splitext(self.name)[0] if self.name else "structure"
+        if editing:
+            atoms, tag = self.ed_atoms, "edited"
+            comment = "edited in Molecule studio%s" % ((" from " + self.name) if self.name else "")
+        elif self.vib_active():
             atoms, tag = self.vib.atoms, "freq-geom"
             comment = "%s | structure of the frequency calculation" % self.name
         else:
@@ -1278,12 +1898,26 @@ class App:
         c = self.view
         c.delete("all")
         W, H = max(c.winfo_width(), 100), max(c.winfo_height(), 100)
-        if not self.frames:
+        editing = self.edit_active()
+        if (not self.frames and not editing) or (editing and not self.ed_atoms):
             self.projected = []
+            self.shown_atoms = []
+            if editing:
+                self.title.config(text="Editor — empty structure")
+                c.create_text(W / 2, H / 2, fill="#667085", justify="center",
+                              text="Empty structure.\nDouble-click a fragment, or click\n"
+                                   "'Take structure from file'.")
+                self.update_measure()
             return
         model = self.model.get()
         mode = self.mode() if self.vib_active() else None
-        if self.vib_active():
+        if editing:
+            atoms = self.ed_atoms
+            cx, cy, cz = centroid(atoms)
+            cache_key = "ed"
+            self.shown_atoms = atoms
+            self.title.config(text="Editor — %d atoms" % len(atoms))
+        elif self.vib_active():
             eq = self.vib.atoms
             cx, cy, cz = centroid(eq)
             atoms = eq
@@ -1303,7 +1937,7 @@ class App:
             self.title.config(text="Structure — %s %d%s" % (self.x_label().lower(), self.current + 1,
                                                            " (%s)" % f.status if f.status else ""))
         R = self.rot
-        extent = self.extent + (1.3 if model == "space" else 0.0)
+        extent = (self.ed_extent if editing else self.extent) + (1.3 if model == "space" else 0.0)
         s = min(W, H) / (2 * extent) * self.zoom
         proj = []
         for i, (el, x, y, z) in enumerate(atoms):
@@ -1445,6 +2079,20 @@ class App:
                 i = self.measure[0]
                 txt = "Picked %s%d — click one more atom." % (atoms[i][0], self.atom_no(i))
         self.measure_lbl.config(text=txt)
+        picks = tuple(self.measure)
+        if self.edit_active() and picks != self.ed_last_picks:
+            self.ed_last_picks = picks          # new picks: show their current value, ready to change
+            mv = measure_value(self.ed_atoms, list(picks)) if 2 <= len(picks) <= 4 else None
+            names = "–".join("%s%d" % (self.ed_atoms[i][0], self.atom_no(i)) for i in picks
+                             if i < len(self.ed_atoms))
+            if mv:
+                self.ed_value.set(("%.3f" if mv[2] == "Å" else "%.1f") % mv[1])
+                self.ed_unit.config(text=mv[2])
+                self.ed_pick_lbl.config(text="%s %s — type a new value and press Set (or Enter)." % (mv[0], names))
+            else:
+                self.ed_value.set("")
+                self.ed_unit.config(text="")
+                self.ed_pick_lbl.config(text=("Picked %s." % names) if picks else "Nothing picked.")
 
     # ---------- refresh everything
     def refresh(self, tree=True):
